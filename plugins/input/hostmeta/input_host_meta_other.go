@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !linux
 // +build !linux
 
 package hostmeta
@@ -20,7 +21,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
 
 	"github.com/shirou/gopsutil/process"

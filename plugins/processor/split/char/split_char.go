@@ -18,8 +18,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
@@ -45,11 +45,11 @@ type ProcessorSplitChar struct {
 
 	quoteChar    byte
 	splitSepChar byte
-	context      ilogtail.Context
+	context      pipeline.Context
 }
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorSplitChar) Init(context ilogtail.Context) error {
+func (p *ProcessorSplitChar) Init(context pipeline.Context) error {
 	if len(p.SplitSep) != 1 {
 		return fmt.Errorf("split char plugin only support single char, invalid sep : %s", p.SplitSep)
 	}
@@ -78,13 +78,15 @@ func (p *ProcessorSplitChar) splitValue(log *protocol.Log, value string) bool {
 	lastValueIndex := 0
 	i := 0
 	if p.QuoteFlag {
+	FORLOOP:
 		for keyIndex = 0; keyIndex < len(p.SplitKeys) && i < len(value); keyIndex++ {
 			// quota flag
-			if value[i] == p.splitSepChar { //nolint:gocritic
+			switch value[i] {
+			case p.splitSepChar:
 				log.Contents = append(log.Contents, &protocol.Log_Content{Key: p.SplitKeys[keyIndex], Value: ""})
 				lastValueIndex = i + 1
 				i++
-			} else if value[i] == p.quoteChar {
+			case p.quoteChar:
 				i++
 				// Enter quote, if a new quote byte appears, three cases are allowed:
 				// 1. It is the last byte of value to represent an ending quote.
@@ -110,14 +112,14 @@ func (p *ProcessorSplitChar) splitValue(log *protocol.Log, value string) bool {
 						newValue = append(newValue, value[i])
 					}
 				}
-			} else {
+			default:
 				if nextIndex := strings.IndexByte(value[i:], p.splitSepChar); nextIndex >= 0 {
 					log.Contents = append(log.Contents, &protocol.Log_Content{Key: p.SplitKeys[keyIndex], Value: value[i : i+nextIndex]})
 					lastValueIndex = i + nextIndex + 1
 					i = lastValueIndex
 					continue
 				} else {
-					break
+					break FORLOOP
 				}
 			}
 		}
@@ -179,7 +181,7 @@ func (p *ProcessorSplitChar) shouldKeepSource(splitResult bool) bool {
 }
 
 func init() {
-	ilogtail.Processors["processor_split_char"] = func() ilogtail.Processor {
+	pipeline.Processors["processor_split_char"] = func() pipeline.Processor {
 		return &ProcessorSplitChar{
 			SplitSep:               "\n",
 			PreserveOthers:         true,

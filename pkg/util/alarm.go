@@ -25,6 +25,29 @@ import (
 var GlobalAlarm *Alarm
 var mu sync.Mutex
 
+var RegisterAlarms map[string]*Alarm
+var regMu sync.Mutex
+
+func RegisterAlarm(key string, alarm *Alarm) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	RegisterAlarms[key] = alarm
+}
+
+func DeleteAlarm(key string) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	delete(RegisterAlarms, key)
+}
+
+func RegisterAlarmsSerializeToPb(logGroup *protocol.LogGroup) {
+	regMu.Lock()
+	defer regMu.Unlock()
+	for _, alarm := range RegisterAlarms {
+		alarm.SerializeToPb(logGroup)
+	}
+}
+
 type AlarmItem struct {
 	Message string
 	Count   int
@@ -44,6 +67,13 @@ func (p *Alarm) Init(project, logstore string) {
 	mu.Unlock()
 }
 
+func (p *Alarm) Update(project, logstore string) {
+	mu.Lock()
+	defer mu.Unlock()
+	p.Project = project
+	p.Logstore = logstore
+}
+
 func (p *Alarm) Record(alarmType, message string) {
 	// donot record empty alarmType
 	if len(alarmType) == 0 {
@@ -61,7 +91,7 @@ func (p *Alarm) Record(alarmType, message string) {
 }
 
 func (p *Alarm) SerializeToPb(logGroup *protocol.LogGroup) {
-	nowTime := (uint32)(time.Now().Unix())
+	nowTime := time.Now()
 	mu.Lock()
 	for alarmType, item := range p.AlarmMap {
 		if item.Count == 0 {
@@ -74,7 +104,7 @@ func (p *Alarm) SerializeToPb(logGroup *protocol.LogGroup) {
 		log.Contents = append(log.Contents, &protocol.Log_Content{Key: "alarm_count", Value: strconv.Itoa(item.Count)})
 		log.Contents = append(log.Contents, &protocol.Log_Content{Key: "alarm_message", Value: item.Message})
 		log.Contents = append(log.Contents, &protocol.Log_Content{Key: "ip", Value: GetIPAddress()})
-		log.Time = nowTime
+		protocol.SetLogTime(log, uint32(nowTime.Unix()))
 		logGroup.Logs = append(logGroup.Logs, log)
 		// clear after serialize
 		item.Count = 0
@@ -86,4 +116,5 @@ func (p *Alarm) SerializeToPb(logGroup *protocol.LogGroup) {
 func init() {
 	GlobalAlarm = new(Alarm)
 	GlobalAlarm.Init("", "")
+	RegisterAlarms = make(map[string]*Alarm)
 }

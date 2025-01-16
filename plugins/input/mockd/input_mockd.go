@@ -15,13 +15,13 @@
 package mockd
 
 import (
-	"io/ioutil"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 )
 
 type ServiceMock struct {
@@ -33,14 +33,15 @@ type ServiceMock struct {
 	Index         int64
 	LogsPerSecond int
 	MaxLogCount   int
+	Block         bool
 	nowLogCount   int
-	context       ilogtail.Context
+	context       pipeline.Context
 }
 
-func (p *ServiceMock) Init(context ilogtail.Context) (int, error) {
+func (p *ServiceMock) Init(context pipeline.Context) (int, error) {
 	p.context = context
 	if len(p.File) > 0 {
-		if content, _ := ioutil.ReadFile(p.File); len(content) > 0 {
+		if content, _ := os.ReadFile(p.File); len(content) > 0 {
 			if p.Fields == nil {
 				p.Fields = make(map[string]string)
 			}
@@ -56,26 +57,38 @@ func (p *ServiceMock) Description() string {
 
 // Gather takes in an accumulator and adds the metrics that the Input
 // gathers. This is called every "interval"
-func (p *ServiceMock) Collect(ilogtail.Collector) error {
+func (p *ServiceMock) Collect(pipeline.Collector) error {
 	return nil
 }
 
 // Start starts the ServiceInput's service, whatever that may be
-func (p *ServiceMock) Start(c ilogtail.Collector) error {
+func (p *ServiceMock) Start(c pipeline.Collector) error {
 	p.shutdown = make(chan struct{})
 	p.waitGroup.Add(1)
 	defer p.waitGroup.Done()
 	for {
+		for {
+			if p.Block {
+				time.Sleep(time.Millisecond * 100)
+				continue
+			}
+			select {
+			case <-p.shutdown:
+				return nil
+			default:
+			}
+			break
+		}
 		beginTime := time.Now()
 		for i := 0; i < p.LogsPerSecond; i++ {
 			p.MockOneLog(c)
 		}
 		nowTime := time.Now()
-		sleepTime := time.Duration(0)
+		sleepTime := time.Millisecond // make sure p.shutdown has high priority
 		if nowTime.Sub(beginTime) < time.Second {
 			sleepTime = time.Second - nowTime.Sub(beginTime)
 		}
-		logger.Info(p.context.GetRuntimeContext(), "input logs", p.LogsPerSecond, "const", nowTime.Sub(beginTime), "sleep", sleepTime)
+		logger.Info(p.context.GetRuntimeContext(), "input logs", p.LogsPerSecond, "cost", nowTime.Sub(beginTime), "sleep", sleepTime)
 		p.nowLogCount += p.LogsPerSecond
 		if p.MaxLogCount > 0 && p.nowLogCount >= p.MaxLogCount {
 			logger.Info(p.context.GetRuntimeContext(), "input logs", p.nowLogCount, "done")
@@ -90,7 +103,7 @@ func (p *ServiceMock) Start(c ilogtail.Collector) error {
 	}
 }
 
-func (p *ServiceMock) MockOneLog(c ilogtail.Collector) {
+func (p *ServiceMock) MockOneLog(c pipeline.Collector) {
 	fields := p.Fields
 	p.Index++
 	fields["Index"] = strconv.FormatInt(p.Index, 10)
@@ -105,7 +118,7 @@ func (p *ServiceMock) Stop() error {
 }
 
 func init() {
-	ilogtail.ServiceInputs["service_mock"] = func() ilogtail.ServiceInput {
+	pipeline.ServiceInputs["service_mock"] = func() pipeline.ServiceInput {
 		return &ServiceMock{Index: 0}
 	}
 }

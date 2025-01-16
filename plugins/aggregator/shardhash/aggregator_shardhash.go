@@ -24,23 +24,23 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
-	"github.com/alibaba/ilogtail/plugins/aggregator/defaultone"
+	"github.com/alibaba/ilogtail/plugins/aggregator/baseagg"
 )
 
 const (
 	defaultShardCount = 8
 	maxShardCount     = 512
-	pluginName        = "aggregator_shardhash"
+	pluginType        = "aggregator_shardhash"
 )
 
 // shardAggregator decides which agg (log group) the log belongs to.
 type shardAggregator struct {
 	md5 string
-	agg *defaultone.AggregatorDefault
+	agg *baseagg.AggregatorBase
 }
 
 // Use an inner queue so that we can append shard hash into log groups' tags.
@@ -81,8 +81,8 @@ type AggregatorShardHash struct {
 	packIDSeqNum int64
 
 	lock       *sync.Mutex
-	context    ilogtail.Context
-	queue      ilogtail.LogGroupQueue
+	context    pipeline.Context
+	queue      pipeline.LogGroupQueue
 	innerQueue *innerQueue
 }
 
@@ -90,12 +90,12 @@ func isPowerOfTwo(num int) bool {
 	return num > 0 && ((num & (num - 1)) == 0)
 }
 
-func (s *AggregatorShardHash) Init(context ilogtail.Context, que ilogtail.LogGroupQueue) (int, error) {
+func (s *AggregatorShardHash) Init(context pipeline.Context, que pipeline.LogGroupQueue) (int, error) {
 	s.context = context
 	s.queue = que
 
 	if len(s.SourceKeys) == 0 {
-		return 0, fmt.Errorf("plugin %v must specify SourceKeys", pluginName)
+		return 0, fmt.Errorf("plugin %v must specify SourceKeys", pluginType)
 	}
 	if s.ShardCount <= 0 || s.ShardCount > maxShardCount {
 		return 0, fmt.Errorf("invalid ShardCount: %v, range [1, %v]",
@@ -132,7 +132,7 @@ func (s *AggregatorShardHash) initShardAggs() (int, error) {
 		}
 		shardAgg := &shardAggregator{
 			md5: hexHash,
-			agg: defaultone.NewAggregatorDefault(),
+			agg: baseagg.NewAggregatorBase(),
 		}
 		if _, err := shardAgg.agg.Init(s.context, s.innerQueue); err != nil {
 			return 0, fmt.Errorf("initialize %vth shard agg error: %v", idx, err)
@@ -161,7 +161,7 @@ func (s *AggregatorShardHash) selectShardAgg(sourceValue string) *shardAggregato
 }
 
 // Add ...
-func (s *AggregatorShardHash) Add(log *protocol.Log) error {
+func (s *AggregatorShardHash) Add(log *protocol.Log, ctx map[string]interface{}) error {
 	var sourceValue string
 	for idx, key := range s.SourceKeys {
 		var val string
@@ -185,7 +185,7 @@ func (s *AggregatorShardHash) Add(log *protocol.Log) error {
 		}
 	}
 
-	return s.selectShardAgg(sourceValue).agg.Add(log)
+	return s.selectShardAgg(sourceValue).agg.Add(log, ctx)
 }
 
 // update resets topic and appends tags (shardHash, pack ID) if they are not existing.
@@ -237,7 +237,7 @@ func newAggregatorShardHash() *AggregatorShardHash {
 }
 
 func init() {
-	ilogtail.Aggregators[pluginName] = func() ilogtail.Aggregator {
+	pipeline.Aggregators[pluginType] = func() pipeline.Aggregator {
 		return newAggregatorShardHash()
 	}
 }

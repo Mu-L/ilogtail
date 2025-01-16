@@ -17,7 +17,6 @@ package telegraf
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path"
@@ -44,7 +43,7 @@ func (tm *Manager) isRunning() bool {
 }
 
 func init() {
-	data, err := ioutil.ReadFile("local_test/telegraf_test.conf")
+	data, err := os.ReadFile("local_test/telegraf_test.conf")
 	if err != nil {
 		panic(err)
 	}
@@ -85,15 +84,15 @@ func TestDeleteOutdatedConfig(t *testing.T) {
 
 	confPath := path.Join(testTelegrafPath, "conf.d")
 	require.NoError(t, os.MkdirAll(confPath, 0750))
-	require.NoError(t, ioutil.WriteFile(path.Join(confPath, "a.conf"), []byte(`content`), 0600))
-	require.NoError(t, ioutil.WriteFile(path.Join(confPath, "b.conf"), []byte(`content`), 0600))
-	files, err := ioutil.ReadDir(confPath)
+	require.NoError(t, os.WriteFile(path.Join(confPath, "a.conf"), []byte(`content`), 0600))
+	require.NoError(t, os.WriteFile(path.Join(confPath, "b.conf"), []byte(`content`), 0600))
+	files, err := os.ReadDir(confPath)
 	require.NoError(t, err)
 	require.Equal(t, len(files), 2)
 
 	getTestTelegrafManager(t)
 
-	files, err = ioutil.ReadDir(confPath)
+	files, err = os.ReadDir(confPath)
 	require.NoError(t, err)
 	require.Equal(t, len(files), 0)
 }
@@ -125,12 +124,12 @@ func TestRegisterAndUnregister(t *testing.T) {
 		Name:   "config",
 		Detail: defaultConfigDetail,
 	}
-	inst.RegisterConfig(c)
+	inst.RegisterConfig(nil, c)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, inst.isRunning())
 	require.True(t, isPathExists(path.Join(inst.telegrafConfPath, c.Name+".conf")))
 
-	inst.UnregisterConfig(c)
+	inst.UnregisterConfig(nil, c)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.False(t, inst.isRunning())
 	require.False(t, isPathExists(path.Join(inst.telegrafConfPath, c.Name+".conf")))
@@ -148,7 +147,7 @@ func TestUpdateConfig(t *testing.T) {
 		Name:   "config",
 		Detail: defaultConfigDetail,
 	}
-	inst.RegisterConfig(c)
+	inst.RegisterConfig(nil, c)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, inst.isRunning())
 
@@ -159,7 +158,7 @@ func TestUpdateConfig(t *testing.T) {
 		Name:   c.Name,
 		Detail: defaultConfigDetail + "\n",
 	}
-	inst.RegisterConfig(c2)
+	inst.RegisterConfig(nil, c2)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, inst.isRunning())
 
@@ -172,7 +171,7 @@ func TestUpdateConfig(t *testing.T) {
 	require.Equal(t, loadedC.Detail, c2.Detail)
 	inst.mu.Unlock()
 
-	inst.UnregisterConfig(c2)
+	inst.UnregisterConfig(nil, c2)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.False(t, inst.isRunning())
 }
@@ -189,7 +188,7 @@ func TestMultipleConfig(t *testing.T) {
 		Name:   "config",
 		Detail: defaultConfigDetail,
 	}
-	inst.RegisterConfig(c)
+	inst.RegisterConfig(nil, c)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, inst.isRunning())
 	require.True(t, isPathExists(path.Join(inst.telegrafConfPath, c.Name+".conf")))
@@ -198,7 +197,7 @@ func TestMultipleConfig(t *testing.T) {
 		Name:   c.Name + "2",
 		Detail: defaultConfigDetail + "\n",
 	}
-	inst.RegisterConfig(c2)
+	inst.RegisterConfig(nil, c2)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, inst.isRunning())
 	require.True(t, isPathExists(path.Join(inst.telegrafConfPath, c2.Name+".conf")))
@@ -215,8 +214,8 @@ func TestMultipleConfig(t *testing.T) {
 	}
 	inst.mu.Unlock()
 
-	inst.UnregisterConfig(c)
-	inst.UnregisterConfig(c2)
+	inst.UnregisterConfig(nil, c)
+	inst.UnregisterConfig(nil, c2)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.False(t, inst.isRunning())
 	require.False(t, isPathExists(path.Join(inst.telegrafConfPath, c.Name+".conf")))
@@ -239,7 +238,7 @@ func TestInstall(t *testing.T) {
 	require.False(t, inst.install())
 
 	fileContent := fmt.Sprintf("#!/bin/sh\nmv %v %v", tmpName, inst.telegrafdPath)
-	require.NoError(t, ioutil.WriteFile(scriptPath, []byte(fileContent), 0600))
+	require.NoError(t, os.WriteFile(scriptPath, []byte(fileContent), 0600))
 
 	require.True(t, inst.install())
 	require.True(t, isPathExists(inst.telegrafdPath))
@@ -259,7 +258,7 @@ func TestOverwriteConfigFile(t *testing.T) {
 		Name:   "config",
 		Detail: defaultConfigDetail,
 	}
-	inst.RegisterConfig(c)
+	inst.RegisterConfig(nil, c)
 	time.Sleep(time.Millisecond * time.Duration(500))
 	require.True(t, isPathExists(inst.telegrafConfPath))
 }

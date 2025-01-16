@@ -20,14 +20,14 @@ package systemv2
 import (
 	"bufio"
 	"bytes"
-	"io/ioutil"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 
 	"github.com/prometheus/procfs"
 	"github.com/shirou/gopsutil/disk"
@@ -98,7 +98,8 @@ func (st tcpState) String() string {
 	}
 }
 
-func (r *InputSystem) Init(context ilogtail.Context) (int, error) {
+func (r *InputSystem) Init(context pipeline.Context) (int, error) {
+	r.context = context
 	// mount the host proc path
 	fs, err := procfs.NewFS(helper.GetMountedFilePath(procfs.DefaultMountPoint))
 	if err != nil {
@@ -109,9 +110,9 @@ func (r *InputSystem) Init(context ilogtail.Context) (int, error) {
 	return r.CommonInit(context)
 }
 
-func (r *InputSystem) CollectTCPStats(collector ilogtail.Collector, stat *net.ProtoCountersStat) {
+func (r *InputSystem) CollectTCPStats(collector pipeline.Collector, stat *net.ProtoCountersStat) {
 	if !r.TCP {
-		r.addMetric(collector, "protocol_tcp_established", r.commonLabelsStr, float64(stat.Stats["CurrEstab"]))
+		r.addMetric(collector, "protocol_tcp_established", &r.commonLabels, float64(stat.Stats["CurrEstab"]))
 		return
 	}
 
@@ -138,11 +139,11 @@ func (r *InputSystem) CollectTCPStats(collector ilogtail.Collector, stat *net.Pr
 		tcpStats[tcpRxQueuedBytes] += line.RxQueue
 	}
 	for s, num := range tcpStats {
-		r.addMetric(collector, "protocol_tcp_"+s.String(), r.commonLabelsStr, float64(num))
+		r.addMetric(collector, "protocol_tcp_"+s.String(), &r.commonLabels, float64(num))
 	}
 }
 
-func (r *InputSystem) CollectOpenFD(collector ilogtail.Collector) {
+func (r *InputSystem) CollectOpenFD(collector pipeline.Collector) {
 	// mount the host proc path
 	file, err := os.Open(helper.GetMountedFilePath("/proc/sys/fs/file-nr"))
 	if err != nil {
@@ -152,7 +153,7 @@ func (r *InputSystem) CollectOpenFD(collector ilogtail.Collector) {
 	defer func(file *os.File) {
 		_ = file.Close()
 	}(file)
-	content, err := ioutil.ReadAll(file)
+	content, err := io.ReadAll(file)
 	if err != nil {
 		logger.Error(r.context.GetRuntimeContext(), "READ_FILENR_ALARM", "err", err)
 		return
@@ -164,13 +165,13 @@ func (r *InputSystem) CollectOpenFD(collector ilogtail.Collector) {
 	}
 	allocated, _ := strconv.ParseFloat(string(parts[0]), 64)
 	maximum, _ := strconv.ParseFloat(string(parts[2]), 64)
-	r.addMetric(collector, "fd_allocated", r.commonLabelsStr, allocated)
-	r.addMetric(collector, "fd_max", r.commonLabelsStr, maximum)
+	r.addMetric(collector, "fd_allocated", &r.commonLabels, allocated)
+	r.addMetric(collector, "fd_max", &r.commonLabels, maximum)
 }
 
 // CollectDiskUsage use `/proc/1/mounts` to find the device rather than `proc/self/mounts`
 // because one device would be mounted many times in virtual environment.
-func (r *InputSystem) CollectDiskUsage(collector ilogtail.Collector) {
+func (r *InputSystem) CollectDiskUsage(collector pipeline.Collector) {
 	// mount the host proc path
 	file, err := os.Open(helper.GetMountedFilePath("/proc/1/mounts"))
 	if err != nil {
@@ -198,12 +199,10 @@ func (r *InputSystem) CollectDiskUsage(collector ilogtail.Collector) {
 			logger.Debug(r.context.GetRuntimeContext(), "ignore disk path", text)
 			continue
 		}
-		newLabels := r.commonLabels.Clone()
-		newLabels.Append("path", parts[1])
-		newLabels.Append("device", parts[0])
-		newLabels.Append("fs_type", parts[2])
-		newLabels.Sort()
-		labels := newLabels.String()
+		labels := r.commonLabels.Clone()
+		labels.Append("path", parts[1])
+		labels.Append("device", parts[0])
+		labels.Append("fs_type", parts[2])
 		// wrapper with mountedpath because of using unix statfs rather than proc file system.
 		usage, err := disk.Usage(helper.GetMountedFilePath(parts[1]))
 		if err == nil {

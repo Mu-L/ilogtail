@@ -15,11 +15,11 @@
 package skywalking
 
 import (
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
-	"github.com/alibaba/ilogtail/plugins/aggregator/defaultone"
+	"github.com/alibaba/ilogtail/plugins/aggregator/baseagg"
 
 	"sync"
 	"time"
@@ -43,15 +43,15 @@ type AggregatorSkywalking struct {
 	TraceLogstore    string
 	LogLogstore      string
 
-	metricsAgg *defaultone.AggregatorDefault
-	traceAgg   *defaultone.AggregatorDefault
-	logAgg     *defaultone.AggregatorDefault
+	metricsAgg *baseagg.AggregatorBase
+	traceAgg   *baseagg.AggregatorBase
+	logAgg     *baseagg.AggregatorBase
 	Lock       *sync.Mutex
-	context    ilogtail.Context
-	queue      ilogtail.LogGroupQueue
+	context    pipeline.Context
+	queue      pipeline.LogGroupQueue
 }
 
-func (p *AggregatorSkywalking) Init(context ilogtail.Context, que ilogtail.LogGroupQueue) (int, error) {
+func (p *AggregatorSkywalking) Init(context pipeline.Context, que pipeline.LogGroupQueue) (int, error) {
 	if p.MetricsLogstore == "" {
 		p.MetricsLogstore = DefaultMetricsLogstore
 	}
@@ -64,19 +64,19 @@ func (p *AggregatorSkywalking) Init(context ilogtail.Context, que ilogtail.LogGr
 
 	p.context = context
 	p.queue = que
-	p.metricsAgg = defaultone.NewAggregatorDefault()
+	p.metricsAgg = baseagg.NewAggregatorBase()
 	if _, err := p.metricsAgg.Init(context, que); err != nil {
 		return 0, err
 	}
 	p.metricsAgg.InitInner(p.PackFlag, p.context.GetConfigName()+p.MetricsLogstore+util.GetIPAddress()+time.Now().String(), p.Lock, p.MetricsLogstore, p.Topic, p.MaxLogCount, p.MaxLogGroupCount)
 
-	p.traceAgg = defaultone.NewAggregatorDefault()
+	p.traceAgg = baseagg.NewAggregatorBase()
 	if _, err := p.traceAgg.Init(context, que); err != nil {
 		return 0, err
 	}
 	p.traceAgg.InitInner(p.PackFlag, p.context.GetConfigName()+p.TraceLogstore+util.GetIPAddress()+time.Now().String(), p.Lock, p.TraceLogstore, p.Topic, p.MaxLogCount, p.MaxLogGroupCount)
 
-	p.logAgg = defaultone.NewAggregatorDefault()
+	p.logAgg = baseagg.NewAggregatorBase()
 	if _, err := p.logAgg.Init(context, que); err != nil {
 		return 0, err
 	}
@@ -91,31 +91,19 @@ func (*AggregatorSkywalking) Description() string {
 // Add adds @log to aggregator.
 // Add use first content as route key
 // Add returns any error encountered, nil means success.
-func (p *AggregatorSkywalking) Add(log *protocol.Log) error {
+func (p *AggregatorSkywalking) Add(log *protocol.Log, ctx map[string]interface{}) error {
 	if len(log.Contents) > 0 {
 		routeKey := log.Contents[0]
-		if routeKey.Key != "_topic_" {
-			logger.Error(p.context.GetRuntimeContext(), "SKYWALKING_ROUTE_KEY_ERROR", "error", "first content is not topic", "key", routeKey.Key, "values", func() string {
-				var str string
-				for _, kv := range log.Contents {
-					str += kv.String() + "$"
-				}
-				return str
-			}())
-
-			return p.logAgg.Add(log)
-		}
-		log.Contents = log.Contents[1:]
-		switch routeKey.Value {
-		case "metrics":
-			return p.metricsAgg.Add(log)
-		case "trace":
-			return p.traceAgg.Add(log)
-		case "log":
-			return p.logAgg.Add(log)
+		switch routeKey.Key {
+		case "__name__":
+			return p.metricsAgg.Add(log, ctx)
+		case "links":
+			return p.traceAgg.Add(log, ctx)
+		case "otlp.name":
+			return p.logAgg.Add(log, ctx)
 		default:
 			logger.Warning(p.context.GetRuntimeContext(), "SKYWALKING_TOPIC_NOT_RECOGNIZED", "error", "topic not recognized", "topic", routeKey.Value)
-			return p.logAgg.Add(log)
+			return p.logAgg.Add(log, ctx)
 		}
 	}
 	return nil
@@ -144,7 +132,7 @@ func NewAggregatorSkywalking() *AggregatorSkywalking {
 	}
 }
 func init() {
-	ilogtail.Aggregators["aggregator_skywalking"] = func() ilogtail.Aggregator {
+	pipeline.Aggregators["aggregator_skywalking"] = func() pipeline.Aggregator {
 		return NewAggregatorSkywalking()
 	}
 }

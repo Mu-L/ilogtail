@@ -19,12 +19,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	pluginmanager "github.com/alibaba/ilogtail/pluginmanager"
 )
@@ -57,6 +58,7 @@ func newProcessor(sourceKeys []string, key []byte, iv []byte, keyFilePath string
 
 	ctxImpl := &pluginmanager.ContextImp{}
 	ctxImpl.InitContext("test", "test", "test")
+	ctxImpl.RegisterMetricRecord(make([]pipeline.LabelPair, 0))
 	_ = p.Init(ctxImpl)
 	return p
 }
@@ -90,11 +92,11 @@ func testProcess(t *testing.T, p *ProcessorEncrypt) {
 			outputFilePath := "/tmp/test_aes_output"
 			ciphertextBytes, err := hex.DecodeString(ciphertext)
 			require.NoError(t, err)
-			require.NoError(t, ioutil.WriteFile(inputFilePath, ciphertextBytes, 0600|0755))
+			require.NoError(t, os.WriteFile(inputFilePath, ciphertextBytes, 0600|0755))
 			require.NoError(t, exec.Command("openssl", "enc", "-d", "-aes-256-cbc", "-iv", iv, //nolint:gosec
 				"-K", p.EncryptionParameters.Key, "-in", inputFilePath, "-out", outputFilePath).Run())
 
-			plaintext, err := ioutil.ReadFile(outputFilePath)
+			plaintext, err := os.ReadFile(outputFilePath)
 			require.NoError(t, err)
 			require.Equal(t, text, string(plaintext))
 		}
@@ -114,7 +116,7 @@ func TestKeyFile(t *testing.T) {
 	fileBytes, err := json.Marshal(struct{ Key string }{hex.EncodeToString(getRandomBytes(32))})
 	require.NoError(t, err)
 	keyFilePath := "/tmp/test_aes_key.json"
-	require.NoError(t, ioutil.WriteFile(keyFilePath, fileBytes, 0600|0755))
+	require.NoError(t, os.WriteFile(keyFilePath, fileBytes, 0600|0755))
 	p := newProcessor(nil, []byte("file://"+keyFilePath), nil, keyFilePath)
 
 	testProcess(t, p)

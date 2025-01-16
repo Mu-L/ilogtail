@@ -25,13 +25,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 )
 
 type InputRedis struct {
 	ServerUrls []string
-	context    ilogtail.Context
+	context    pipeline.Context
 }
 
 // ## specify servers via a url matching:
@@ -45,7 +45,7 @@ type InputRedis struct {
 // ## If no port is specified, 6379 is used
 // servers = ["tcp://localhost:6379"]
 
-func (r *InputRedis) Init(context ilogtail.Context) (int, error) {
+func (r *InputRedis) Init(context pipeline.Context) (int, error) {
 	r.context = context
 	return 0, nil
 }
@@ -71,7 +71,7 @@ var ErrProtocolError = errors.New("redis protocol error")
 
 const defaultPort = "6379"
 
-func (r *InputRedis) Collect(collector ilogtail.Collector) error {
+func (r *InputRedis) Collect(collector pipeline.Collector) error {
 
 	if len(r.ServerUrls) == 0 {
 		return r.gatherServer(&url.URL{
@@ -119,7 +119,7 @@ func (r *InputRedis) Collect(collector ilogtail.Collector) error {
 
 var defaultTimeout = 5 * time.Second
 
-func (r *InputRedis) gatherServer(addr *url.URL, collector ilogtail.Collector) error {
+func (r *InputRedis) gatherServer(addr *url.URL, collector pipeline.Collector) error {
 	var address string
 
 	if addr.Scheme == "unix" {
@@ -177,7 +177,7 @@ func (r *InputRedis) gatherServer(addr *url.URL, collector ilogtail.Collector) e
 // gatherInfoOutput gathers
 func gatherInfoOutput(
 	rdr *bufio.Reader,
-	collector ilogtail.Collector,
+	collector pipeline.Collector,
 	tags map[string]string,
 ) error {
 	var section string
@@ -243,7 +243,9 @@ func gatherInfoOutput(
 
 // Parse the special Keyspace line at end of redis stats
 // This is a special line that looks something like:
-//     db0:keys=2,expires=0,avg_ttl=0
+//
+//	db0:keys=2,expires=0,avg_ttl=0
+//
 // And there is one for each db on the redis instance
 func gatherKeyspaceLine(name, line string, fields *map[string]string, dbTotal *TotalDBInfo) {
 	if strings.Contains(line, "keys=") {
@@ -267,7 +269,7 @@ func gatherKeyspaceLine(name, line string, fields *map[string]string, dbTotal *T
 }
 
 func init() {
-	ilogtail.MetricInputs["metric_redis"] = func() ilogtail.MetricInput {
+	pipeline.MetricInputs["metric_redis"] = func() pipeline.MetricInput {
 		return &InputRedis{}
 	}
 }

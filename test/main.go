@@ -1,41 +1,68 @@
-// Copyright 2021 iLogtail Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package main
 
 import (
-	"context"
+	"crypto/rand"
+	"flag"
+	"fmt"
+	"math/big"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
-	"github.com/urfave/cli/v2"
+	"github.com/cucumber/godog"
 
-	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/test/engine"
 )
 
 func main() {
-	app := cli.NewApp()
-	app.Name = "ilogtail-e2e"
-	app.Version = "latest"
-	app.Compiled = time.Now()
-	app.Description = "ilogtail-e2e is for ilogtail integration testing"
-	app.Commands = []*cli.Command{
-		&cmdDocs,
-		&cmdStart,
+	name := flag.String("test_case", "soak", "test case type")
+	flag.Parse()
+
+	for {
+		triggerOneRound(*name)
+		time.Sleep(5 * time.Minute)
 	}
-	app.Action = cli.ShowAppHelp
-	if err := app.Run(os.Args); err != nil {
-		logger.Error(context.Background(), "START_E2E_ALARM", "err", err)
+}
+
+func triggerOneRound(name string) {
+	fmt.Println("=====================================")
+	fmt.Printf("Trigger one round of %s\n", name)
+	// walk all files name endwith .feature in name
+	files := make([]string, 0)
+	err := filepath.Walk(name, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(path, ".feature") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("found %d files\n", len(files))
+	randomIndex, err := rand.Int(rand.Reader, big.NewInt(int64(len(files))))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	fmt.Printf("run %s\n", files[randomIndex.Int64()])
+	fmt.Println("=====================================")
+
+	// run godog
+	suite := godog.TestSuite{
+		Name:                "Soak",
+		ScenarioInitializer: engine.ScenarioInitializer,
+		Options: &godog.Options{
+			Format: "pretty",
+			Paths:  []string{files[randomIndex.Int64()]},
+		},
+	}
+	if suite.Run() != 0 {
+		fmt.Printf("run %s failed\n", files[randomIndex.Int64()])
+		return
 	}
 }

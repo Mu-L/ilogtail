@@ -29,12 +29,11 @@ your changes, such as:
 - `fixed` for any bug fixes.
 - `security` in case of vulnerabilities.
 - `doc` for doc changes.
+- `test` for tests.
 
-## Example 
+## Example
 
 - [public] [both] [updated] add a new feature
-## [Unreleased]
 
-- [public] [both] [doc] add input stdout plugin doc
-- [public] [both] [fixed] fix threadNum and fdNum in process plugin
-- [public] [both] [updated] support running multi prometheus input plugins at the same time
+## [Unreleased]
+- [inner] [both] [updated] Support SLS Metricstore output
