@@ -23,8 +23,8 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/encoding"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
@@ -41,10 +41,10 @@ type Flusher struct {
 	dialSuccess bool
 	conn        *grpc.ClientConn
 	client      protocol.LogReportServiceClient
-	ctx         ilogtail.Context
+	ctx         pipeline.Context
 }
 
-func (f *Flusher) Init(ctx ilogtail.Context) error {
+func (f *Flusher) Init(ctx pipeline.Context) error {
 	encoding.RegisterCodec(new(protocol.Codec))
 	f.ctx = ctx
 	options := make([]grpc.DialOption, 0, 1)
@@ -101,6 +101,9 @@ func (f *Flusher) Flush(projectName string, logstoreName string, configName stri
 		return err
 	}
 	for _, group := range logGroupList {
+		if len(group.Logs) == 0 {
+			continue
+		}
 		if err := stream.Send(group); err != nil {
 			logger.Error(f.ctx.GetRuntimeContext(), "GRPC_FLUSH_ALARM", "err", err)
 			return err
@@ -124,7 +127,7 @@ func (f *Flusher) closeStream(stream protocol.LogReportService_CollectClient) {
 }
 
 func init() {
-	ilogtail.Flushers["flusher_grpc"] = func() ilogtail.Flusher {
+	pipeline.Flushers["flusher_grpc"] = func() pipeline.Flusher {
 		return &Flusher{
 			Address: ":8000",
 		}

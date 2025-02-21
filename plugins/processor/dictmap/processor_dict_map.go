@@ -21,12 +21,11 @@ import (
 	"os"
 
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
-
-	"github.com/alibaba/ilogtail"
 )
 
-const pluginName = "processor_dict_map"
+const pluginType = "processor_dict_map"
 
 type ProcessorDictMap struct {
 	DictFilePath  string
@@ -38,15 +37,15 @@ type ProcessorDictMap struct {
 	Mode          string
 	MaxDictSize   int
 	scanDestKey   bool
-	context       ilogtail.Context
+	context       pipeline.Context
 }
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorDictMap) Init(context ilogtail.Context) error {
+func (p *ProcessorDictMap) Init(context pipeline.Context) error {
 	p.context = context
 
 	if p.SourceKey == "" {
-		return fmt.Errorf("must specify SourceKey for plugin %v", pluginName)
+		return fmt.Errorf("must specify SourceKey for plugin %v", pluginType)
 	}
 
 	if p.DestKey == "" || p.DestKey == p.SourceKey {
@@ -57,11 +56,11 @@ func (p *ProcessorDictMap) Init(context ilogtail.Context) error {
 	}
 
 	if p.DictFilePath == "" && len(p.MapDict) == 0 {
-		return fmt.Errorf("at least give one source map data for plugin %v", pluginName)
+		return fmt.Errorf("at least give one source map data for plugin %v", pluginType)
 	}
 
 	if len(p.MapDict) > p.MaxDictSize {
-		return fmt.Errorf("map size exceed maximum length %v for plugin %v ", p.MaxDictSize, pluginName)
+		return fmt.Errorf("map size exceed maximum length %v for plugin %v ", p.MaxDictSize, pluginType)
 	}
 
 	if p.Mode != "overwrite" && p.Mode != "fill" {
@@ -129,7 +128,7 @@ func (p *ProcessorDictMap) readCsvFile() error {
 			return fmt.Errorf("hash crash, check whether the map rule redefined of value: %+v", value)
 		}
 
-		logger.Debugf(p.context.GetRuntimeContext(), "Plugin %v adds mapping rule %v : %v", pluginName, row[0], row[1])
+		logger.Debugf(p.context.GetRuntimeContext(), "Plugin %v adds mapping rule %v : %v", pluginType, row[0], row[1])
 		p.MapDict[row[0]] = row[1]
 	}
 	return nil
@@ -188,7 +187,7 @@ func (p *ProcessorDictMap) processLog(log *protocol.Log) {
 }
 
 func init() {
-	ilogtail.Processors[pluginName] = func() ilogtail.Processor {
+	pipeline.Processors[pluginType] = func() pipeline.Processor {
 		return &ProcessorDictMap{
 			HandleMissing: false,
 			Missing:       "Unknown",

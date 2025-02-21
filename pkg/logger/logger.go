@@ -20,15 +20,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"path"
+
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/alibaba/ilogtail/pkg"
+	"github.com/alibaba/ilogtail/pkg/config"
 	"github.com/alibaba/ilogtail/pkg/util"
 
 	"github.com/cihub/seelog"
@@ -39,7 +42,7 @@ const (
 	asyncPattern = `
 <seelog type="asynctimer" asyncinterval="500000" minlevel="%s" >
  <outputs formatid="common">
-	 <rollingfile type="size" filename="%slogtail_plugin.LOG" maxsize="2097152" maxrolls="10"/>
+	 <rollingfile type="size" filename="%s%s" maxsize="20000000" maxrolls="10"/>
 	 %s
      %s
  </outputs>
@@ -51,7 +54,7 @@ const (
 	syncPattern = `
 <seelog type="sync" minlevel="%s" >
  <outputs formatid="common">
-	 <rollingfile type="size" filename="%slogtail_plugin.LOG" maxsize="2097152" maxrolls="10"/>
+	 <rollingfile type="size" filename="%s%s" maxsize="20000000" maxrolls="10"/>
 	 %s
 	 %s
  </outputs>
@@ -90,13 +93,14 @@ var (
 	levelFlag          string
 	debugFlag          int32
 
-	template  string
-	once      sync.Once
-	wait      sync.WaitGroup
-	closeChan chan struct{}
+	template          string
+	once              sync.Once
+	wait              sync.WaitGroup
+	closeChan         chan struct{}
+	closedCatchStdout bool
 )
 
-func Init() {
+func InitLogger() {
 	once.Do(func() {
 		initNormalLogger()
 		catchStandardOutput()
@@ -105,6 +109,9 @@ func Init() {
 
 func InitTestLogger(options ...ConfigOption) {
 	once.Do(func() {
+		config.LoongcollectorGlobalConfig.LoongCollectorLogDir = "./"
+		config.LoongcollectorGlobalConfig.LoongCollectorConfDir = "./"
+		config.LoongcollectorGlobalConfig.LoongCollectorLogConfDir = "./"
 		initTestLogger(options...)
 		catchStandardOutput()
 	})
@@ -117,7 +124,11 @@ func initNormalLogger() {
 	for _, option := range defaultProductionOptions {
 		option()
 	}
-	setLogConf(util.GetCurrentBinaryPath() + "plugin_logger.xml")
+	confDir := config.LoongcollectorGlobalConfig.LoongCollectorLogConfDir
+	if _, err := os.Stat(confDir); os.IsNotExist(err) {
+		_ = os.MkdirAll(confDir, os.ModePerm)
+	}
+	setLogConf(path.Join(confDir, "plugin_logger.xml"))
 }
 
 // initTestLogger extracted from Init method for unit test.
@@ -130,7 +141,7 @@ func initTestLogger(options ...ConfigOption) {
 	for _, option := range options {
 		option()
 	}
-	setLogConf(util.GetCurrentBinaryPath() + "plugin_logger.xml")
+	setLogConf(path.Join(config.LoongcollectorGlobalConfig.LoongCollectorLogConfDir, "plugin_logger.xml"))
 }
 
 func Debug(ctx context.Context, kvPairs ...interface{}) {
@@ -176,8 +187,11 @@ func Infof(ctx context.Context, format string, params ...interface{}) {
 }
 
 func Warning(ctx context.Context, alarmType string, kvPairs ...interface{}) {
-	msg := generateLog(kvPairs...)
 	ltCtx, ok := ctx.Value(pkg.LogTailMeta).(*pkg.LogtailContextMeta)
+	if ok {
+		kvPairs = append(kvPairs, "logstore", ltCtx.GetLogStore(), "config", ltCtx.GetConfigName())
+	}
+	msg := generateLog(kvPairs...)
 	if ok {
 		_ = logtailLogger.Warn(ltCtx.LoggerHeader(), "AlarmType:", alarmType, "\t", msg)
 		if remoteFlag {
@@ -192,8 +206,12 @@ func Warning(ctx context.Context, alarmType string, kvPairs ...interface{}) {
 }
 
 func Warningf(ctx context.Context, alarmType string, format string, params ...interface{}) {
-	msg := fmt.Sprintf(format, params...)
 	ltCtx, ok := ctx.Value(pkg.LogTailMeta).(*pkg.LogtailContextMeta)
+	if ok {
+		format += "\tlogstore:%v\tconfig:%v"
+		params = append(params, ltCtx.GetLogStore(), ltCtx.GetConfigName())
+	}
+	msg := fmt.Sprintf(format, params...)
 	if ok {
 		_ = logtailLogger.Warn(ltCtx.LoggerHeader(), "AlarmType:", alarmType, "\t", msg)
 		if remoteFlag {
@@ -208,8 +226,11 @@ func Warningf(ctx context.Context, alarmType string, format string, params ...in
 }
 
 func Error(ctx context.Context, alarmType string, kvPairs ...interface{}) {
-	msg := generateLog(kvPairs...)
 	ltCtx, ok := ctx.Value(pkg.LogTailMeta).(*pkg.LogtailContextMeta)
+	if ok {
+		kvPairs = append(kvPairs, "logstore", ltCtx.GetLogStore(), "config", ltCtx.GetConfigName())
+	}
+	msg := generateLog(kvPairs...)
 	if ok {
 		_ = logtailLogger.Error(ltCtx.LoggerHeader(), "AlarmType:", alarmType, "\t", msg)
 		if remoteFlag {
@@ -224,8 +245,12 @@ func Error(ctx context.Context, alarmType string, kvPairs ...interface{}) {
 }
 
 func Errorf(ctx context.Context, alarmType string, format string, params ...interface{}) {
-	msg := fmt.Sprintf(format, params...)
 	ltCtx, ok := ctx.Value(pkg.LogTailMeta).(*pkg.LogtailContextMeta)
+	if ok {
+		format += "\tlogstore:%v\tconfig:%v"
+		params = append(params, ltCtx.GetLogStore(), ltCtx.GetConfigName())
+	}
+	msg := fmt.Sprintf(format, params...)
 	if ok {
 		_ = logtailLogger.Error(ltCtx.LoggerHeader(), "AlarmType:", alarmType, "\t", msg)
 		if remoteFlag {
@@ -246,34 +271,46 @@ func Flush() {
 
 func setLogConf(logConfig string) {
 	if !retainFlag {
-		_ = os.Remove(util.GetCurrentBinaryPath() + "plugin_logger.xml")
+		_ = os.Remove(path.Join(config.LoongcollectorGlobalConfig.LoongCollectorLogConfDir, "plugin_logger.xml"))
 	}
 	debugFlag = 0
 	logtailLogger = seelog.Disabled
 	path := filepath.Clean(logConfig)
 	if _, err := os.Stat(path); err != nil {
 		logConfigContent := generateDefaultConfig()
-		_ = ioutil.WriteFile(path, []byte(logConfigContent), os.ModePerm)
+		_ = os.WriteFile(path, []byte(logConfigContent), os.ModePerm)
 	}
-	fmt.Printf("load log config %s \n", path)
-	logger, err := seelog.LoggerFromConfigAsFile(path)
+	fmt.Fprintf(os.Stderr, "load log config %s \n", path)
+	content, err := os.ReadFile(path)
 	if err != nil {
-		fmt.Println("init logger error", err)
+		fmt.Fprintln(os.Stderr, "init logger error", err)
+		return
+	}
+	dat := string(content)
+	aliyunLogtailLogLevel := strings.ToLower(os.Getenv("LOGTAIL_LOG_LEVEL"))
+	if aliyunLogtailLogLevel != "" {
+		pattern := `(?mi)(minlevel=")([^"]*)(")`
+		regExp := regexp.MustCompile(pattern)
+		dat = regExp.ReplaceAllString(dat, `${1}`+aliyunLogtailLogLevel+`${3}`)
+	}
+	logger, err := seelog.LoggerFromConfigAsString(dat)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "init logger error", err)
 		return
 	}
 	if err := logger.SetAdditionalStackDepth(1); err != nil {
-		fmt.Printf("cannot set logger stack depth: %v\n", err)
+		fmt.Fprintf(os.Stderr, "cannot set logger stack depth: %v\n", err)
 		return
 	}
 	logtailLogger = logger
-	dat, _ := ioutil.ReadFile(path)
-	if strings.Contains(string(dat), "minlevel=\"debug\"") {
+
+	if aliyunLogtailLogLevel == "debug" || strings.Contains(dat, "minlevel=\"debug\"") {
 		debugFlag = 1
 	}
 }
 
 func generateLog(kvPairs ...interface{}) string {
-	var logString = ""
+	logString := ""
 	pairLen := len(kvPairs) / 2
 	for i := 0; i < pairLen; i++ {
 		logString += fmt.Sprintf("%v:%v\t", kvPairs[i<<1], kvPairs[i<<1+1])
@@ -293,14 +330,23 @@ func generateDefaultConfig() string {
 	if memoryReceiverFlag {
 		memoryReceiverFlagStr = "<custom name=\"memory\" />"
 	}
-	return fmt.Sprintf(template, levelFlag, util.GetCurrentBinaryPath(), consoleStr, memoryReceiverFlagStr)
+	return fmt.Sprintf(template, levelFlag, config.LoongcollectorGlobalConfig.LoongCollectorLogDir, config.LoongcollectorGlobalConfig.LoongCollectorPluginLogName, consoleStr, memoryReceiverFlagStr)
 }
 
 // Close the logger and recover the stdout and stderr
 func Close() {
+	CloseCatchStdout()
+	logtailLogger.Close()
+}
+
+// CloseCatchStdout close the goroutine with the catching stdout task.
+func CloseCatchStdout() {
+	if consoleFlag || closedCatchStdout {
+		return
+	}
 	close(closeChan)
 	wait.Wait()
-	logtailLogger.Close()
+	closedCatchStdout = true
 }
 
 // catchStandardOutput catch the stdout and stderr to the ilogtail logger.

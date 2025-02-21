@@ -24,13 +24,11 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -74,8 +72,8 @@ func ReadFirstBlock(line string) string {
 // ReadLinesOffsetN reads contents from file and splits them by new line.
 // The offset tells at which line number to start.
 // The count determines the number of lines to read (starting from offset):
-//   n >= 0: at most n lines
-//   n < 0: whole file
+// n >= 0: at most n lines
+// n < 0: whole file
 func ReadLinesOffsetN(filename string, offset uint, n int) ([]string, error) {
 	f, err := os.Open(filepath.Clean(filename))
 	if err != nil {
@@ -123,7 +121,7 @@ func GetTLSConfig(sslCert, sslKey, sslCA string, insecureSkipVerify bool) (*tls.
 	t := &tls.Config{InsecureSkipVerify: insecureSkipVerify} //nolint:gosec
 
 	if sslCA != "" {
-		caCert, err := ioutil.ReadFile(filepath.Clean(sslCA))
+		caCert, err := os.ReadFile(filepath.Clean(sslCA))
 		if err != nil {
 			return nil, fmt.Errorf("Could not load TLS CA: %v", err)
 		}
@@ -230,15 +228,6 @@ func CutString(val string, maxLen int) string {
 		return val
 	}
 	return val[0:maxLen]
-}
-
-func GetCurrentBinaryPath() string {
-	ex, err := os.Executable()
-	if err != nil {
-		return "./"
-	}
-	exPath := filepath.Dir(ex)
-	return exPath + "/"
 }
 
 func PathExists(path string) (bool, error) {
@@ -366,102 +355,6 @@ func NewLogTagForPackID(prefix string, seqNum *int64) *protocol.LogTag {
 	return tag
 }
 
-// ParseVariableValue parse specific key with logic:
-//     1. if key start with '$', the get from env
-//     2. if key == __ip__, return local ip address
-//     3. if key == __host__, return hostName
-//     others return key
-func ParseVariableValue(key string) string {
-	if len(key) == 0 {
-		return key
-	}
-	if key[0] == '$' {
-		return os.Getenv(key[1:])
-	}
-	if key == "__ip__" {
-		return ipAddress
-	}
-	if key == "__host__" {
-		return hostName
-	}
-	return key
-}
-
-// Label for metric label
-type Label struct {
-	Name  string
-	Value string
-}
-
-// Labels for metric labels
-type Labels []Label
-
-func (l Labels) Len() int {
-	return len(l)
-}
-
-func (l Labels) Swap(i int, j int) {
-	l[i], l[j] = l[j], l[i]
-}
-
-func (l Labels) Less(i int, j int) bool {
-	return l[i].Name < l[j].Name
-}
-
-// DefBucket ...
-type DefBucket struct {
-	Le    float64
-	Count int64
-}
-
-// HistogramData ...
-type HistogramData struct {
-	Buckets []DefBucket
-	Count   int64
-	Sum     float64
-}
-
-// ToMetricLogs ..
-func (hd *HistogramData) ToMetricLogs(name string, timeMs int64, labels Labels) []*protocol.Log {
-	logs := make([]*protocol.Log, 0, len(hd.Buckets)+2)
-	sort.Sort(labels)
-	for _, v := range hd.Buckets {
-		newLabels := make(Labels, len(labels), len(labels)+1)
-		copy(newLabels, labels)
-		newLabels = append(newLabels, Label{Name: "le", Value: strconv.FormatFloat(v.Le, 'g', -1, 64)})
-		sort.Sort(newLabels)
-		logs = append(logs, NewMetricLog(name+"_bucket", timeMs, strconv.FormatInt(v.Count, 10), newLabels))
-	}
-	logs = append(logs, NewMetricLog(name+"_count", timeMs, strconv.FormatInt(hd.Count, 10), labels))
-	logs = append(logs, NewMetricLog(name+"_sum", timeMs, strconv.FormatFloat(hd.Sum, 'g', -1, 64), labels))
-	return logs
-}
-
-// NewMetricLog caller must sort labels
-func NewMetricLog(name string, timeMs int64, value string, labels []Label) *protocol.Log {
-	strTime := strconv.FormatInt(timeMs, 10)
-	metric := &protocol.Log{Time: uint32(timeMs / 1000)}
-	metric.Contents = []*protocol.Log_Content{}
-	metric.Contents = append(metric.Contents, &protocol.Log_Content{Key: "_topic_", Value: "metrics"})
-	metric.Contents = append(metric.Contents, &protocol.Log_Content{Key: "__time_nano__", Value: strTime})
-	metric.Contents = append(metric.Contents, &protocol.Log_Content{Key: "__name__", Value: name})
-
-	builder := strings.Builder{}
-	for index, l := range labels {
-		if index != 0 {
-			builder.WriteString("|")
-		}
-		builder.WriteString(l.Name)
-		builder.WriteString("#$#")
-		builder.WriteString(l.Value)
-
-	}
-	metric.Contents = append(metric.Contents, &protocol.Log_Content{Key: "__labels__", Value: builder.String()})
-
-	metric.Contents = append(metric.Contents, &protocol.Log_Content{Key: "__value__", Value: value})
-	return metric
-}
-
 func MinInt(a, b int) int {
 	if a < b {
 		return a
@@ -481,4 +374,28 @@ func StringDeepCopy(src string) string {
 func StringPointer(s string) unsafe.Pointer {
 	p := (*reflect.StringHeader)(unsafe.Pointer(&s))
 	return unsafe.Pointer(p.Data)
+}
+
+// UniqueStrings Merge (append) slices and remove duplicate from them!
+func UniqueStrings(strSlices ...[]string) []string {
+	uniqueMap := map[string]bool{}
+	for _, strSlice := range strSlices {
+		for _, number := range strSlice {
+			uniqueMap[number] = true
+		}
+	}
+	result := make([]string, 0, len(uniqueMap))
+	for key := range uniqueMap {
+		result = append(result, key)
+	}
+	return result
+}
+
+func Contains[T comparable](s []T, e T) bool {
+	for _, a := range s {
+		if a == e {
+			return true
+		}
+	}
+	return false
 }

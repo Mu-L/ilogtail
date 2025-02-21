@@ -1,3 +1,4 @@
+//go:build linux
 // +build linux
 
 // Copyright 2017 Marcus Heese
@@ -25,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -148,7 +150,7 @@ func (sj *ServiceJournal) addMatchesForUnit(unit string) error {
 //  /blah/blah is converted to blah-blah.mount, anything else is left alone,
 //  except that "suffix" is appended if a valid unit suffix is not present.
 
-//  If allowGlobs, globs characters are preserved. Otherwise, they are escaped.
+// If allowGlobs, globs characters are preserved. Otherwise, they are escaped.
 func unitNameMangle(name, suffix string) (string, error) {
 	// Can't be empty or begin with a dot
 	if len(name) == 0 || name[0] == '.' {
@@ -171,12 +173,12 @@ func unitNameMangle(name, suffix string) (string, error) {
 
 	if isDevicePath(name) {
 		// chop off path and put .device on the end
-		return path.Base(path.Clean(name)) + "device", nil
+		return path.Base(filepath.Clean(name)) + "device", nil
 	}
 
 	if pathIsAbsolute(name) {
 		// chop path and put .mount on the end
-		return path.Base(path.Clean(name)) + ".mount", nil
+		return path.Base(filepath.Clean(name)) + ".mount", nil
 	}
 
 	name = doEscapeMangle(name)

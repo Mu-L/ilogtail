@@ -17,7 +17,6 @@ package doc
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,11 +65,11 @@ func Generate(path string) {
 			str += "	- [" + name + "](" + relativeFile + ")" + lf
 		}
 	}
-	_ = ioutil.WriteFile(fileName, []byte(str), 0600)
+	_ = os.WriteFile(fileName, []byte(str), 0600)
 }
 
-func generatePluginDoc(fileName, pluginName string, doc Doc) {
-	str := topLevel + pluginName + lf
+func generatePluginDoc(fileName, pluginType string, doc Doc) {
+	str := topLevel + pluginType + lf
 	str += secondLevel + "Description" + lf
 	str += doc.Description() + lf
 	str += secondLevel + "Config" + lf
@@ -81,7 +80,7 @@ func generatePluginDoc(fileName, pluginName string, doc Doc) {
 			str += lf + tableSplitor + config.Name + tableSplitor + config.Type + tableSplitor + config.Comment + tableSplitor + config.Default + tableSplitor
 		}
 	}
-	_ = ioutil.WriteFile(fileName, []byte(str), 0600)
+	_ = os.WriteFile(fileName, []byte(str), 0600)
 }
 
 func extractDocConfig(doc Doc) (configs []*FieldConfig) {

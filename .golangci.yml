@@ -47,6 +47,8 @@ run:
   skip-files:
     - plugins/input/journal/unit.go
     - plugins/input/journal/follow.go
+    - plugins/input/prometheus/sls_writer.go
+    - plugin_main/plugin_http.go
 
   # by default isn't set. If set we pass it to "go list -mod={option}". From "go help modules":
   # If invoked with -mod=readonly, the go command is disallowed from the implicit
@@ -74,7 +76,6 @@ linters-settings:
   gosec:
     # To select a subset of rules to run.
     # Available rules: https://github.com/securego/gosec#available-rules
-    includes:
     excludes:
       - G204
   govet:
@@ -104,7 +105,6 @@ linters-settings:
 
   misspell:
     locale: US
-    ignore-words:
 
 linters:
   disable:
@@ -129,7 +129,6 @@ issues:
   # But independently from this option we use default exclude patterns,
   # it can be disabled by `exclude-use-default: false`. To list all
   # excluded by default patterns execute `golangci-lint run --help`
-  exclude:
 
   # Excluding configuration per-path, per-linter, per-text and per-source
   exclude-rules:
@@ -143,6 +142,9 @@ issues:
     - path: plugins/test
       linters:
         - revive
+    - linters:
+        - staticcheck
+      text: "SA1019:"
   # The list of ids of default excludes to include or disable. By default it's empty.
   # See the list of default excludes here https://golangci-lint.run/usage/configuration.
   include:

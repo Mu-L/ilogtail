@@ -18,9 +18,9 @@ import (
 	"errors"
 	"regexp"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
@@ -39,15 +39,15 @@ type ProcessorRegex struct {
 	KeepSourceIfParseError bool
 	SourceKey              string
 
-	context       ilogtail.Context
-	logPairMetric ilogtail.CounterMetric
+	context       pipeline.Context
+	logPairMetric pipeline.CounterMetric
 	re            *regexp.Regexp
 }
 
 var errNoRegexKey = errors.New("no regex key error")
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorRegex) Init(context ilogtail.Context) error {
+func (p *ProcessorRegex) Init(context pipeline.Context) error {
 	p.context = context
 	if len(p.Keys) == 0 {
 		return errNoRegexKey
@@ -59,8 +59,9 @@ func (p *ProcessorRegex) Init(context ilogtail.Context) error {
 		logger.Error(p.context.GetRuntimeContext(), "PROCESSOR_INIT_ALARM", "init regex error", err, "regex", p.Regex)
 		return err
 	}
-	p.logPairMetric = helper.NewAverageMetric("anchor_pairs_per_log")
-	p.context.RegisterCounterMetric(p.logPairMetric)
+
+	metricsRecord := p.context.GetMetricRecord()
+	p.logPairMetric = helper.NewAverageMetricAndRegister(metricsRecord, helper.PluginPairsPerLogTotal)
 	return nil
 }
 
@@ -128,7 +129,7 @@ func (p *ProcessorRegex) processRegex(log *protocol.Log, val *string) bool {
 }
 
 func init() {
-	ilogtail.Processors["processor_regex"] = func() ilogtail.Processor {
+	pipeline.Processors["processor_regex"] = func() pipeline.Processor {
 		return &ProcessorRegex{
 			FullMatch:              false,
 			NoMatchError:           true,

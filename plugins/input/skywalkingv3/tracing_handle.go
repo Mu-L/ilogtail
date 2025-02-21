@@ -19,17 +19,40 @@ import (
 	"io"
 	"runtime"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	v3 "github.com/alibaba/ilogtail/plugins/input/skywalkingv3/skywalking/network/common/v3"
 	skywalking "github.com/alibaba/ilogtail/plugins/input/skywalkingv3/skywalking/network/language/agent/v3"
 )
 
 type TracingHandler struct {
-	context                      ilogtail.Context
-	collector                    ilogtail.Collector
+	context                      pipeline.Context
+	collector                    pipeline.Collector
 	cache                        *ResourcePropertiesCache
 	compIDMessagingSystemMapping map[int32]string
+}
+
+type traceSegmentHandler interface {
+	collectorSegment(segment *skywalking.SegmentObject) (result interface{}, e error)
+}
+
+type traceSegmentsHandler interface {
+	collectorSegments(segment []*skywalking.SegmentObject) (result interface{}, e error)
+}
+
+func (h *TracingHandler) collectorSegments(segments []*skywalking.SegmentObject) (result interface{}, e error) {
+	defer panicRecover()
+	for _, segment := range segments {
+		if e = h.collectSegment(segment, h.compIDMessagingSystemMapping); e != nil {
+			return e, nil
+		}
+	}
+	return &v3.Commands{}, nil
+}
+
+func (h *TracingHandler) collectorSegment(segment *skywalking.SegmentObject) (result interface{}, e error) {
+	defer panicRecover()
+	return &v3.Commands{}, h.collectSegment(segment, h.compIDMessagingSystemMapping)
 }
 
 func panicRecover() {

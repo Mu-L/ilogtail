@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !linux
 // +build !linux
 
 package process
@@ -24,7 +25,7 @@ import (
 	"github.com/shirou/gopsutil/cpu"
 	"github.com/shirou/gopsutil/process"
 
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
 )
 
@@ -123,8 +124,8 @@ func (pc *processCacheOther) FetchCoreCount() int64 {
 	return pc.meta.fetchCoreCount
 }
 
-func (pc *processCacheOther) Labels(customLabels helper.KeyValues) string {
-	if pc.meta.labels == "" {
+func (pc *processCacheOther) Labels(customLabels *helper.MetricLabels) *helper.MetricLabels {
+	if pc.meta.labels == nil {
 		if name := pc.getCommName(); name != "" {
 			processLabels := customLabels.Clone()
 			processLabels.Append("pid", strconv.Itoa(pc.GetPid()))
@@ -134,8 +135,7 @@ func (pc *processCacheOther) Labels(customLabels helper.KeyValues) string {
 			} else {
 				processLabels.Append("comm", name)
 			}
-			processLabels.Sort()
-			pc.meta.labels = processLabels.String()
+			pc.meta.labels = processLabels
 		}
 	}
 	return pc.meta.labels

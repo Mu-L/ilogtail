@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,8 +26,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
 
@@ -57,7 +56,7 @@ type Response struct {
 
 	compiledStringMatch *regexp.Regexp
 	client              *http.Client
-	context             ilogtail.Context
+	context             pipeline.Context
 	tags                map[string]string
 	lastLoadAddressTime time.Time
 }
@@ -93,7 +92,7 @@ func (h *Response) loadAddresses() error {
 	return nil
 }
 
-func (h *Response) Init(context ilogtail.Context) (int, error) {
+func (h *Response) Init(context pipeline.Context) (int, error) {
 	h.context = context
 
 	// Set default values
@@ -247,14 +246,14 @@ func (h *Response) httpGather(address string) (map[string]string, error) {
 		}
 	}
 	defer func() {
-		_, _ = io.Copy(ioutil.Discard, resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 	}()
 
 	fields["_response_time_ms_"] = strconv.FormatFloat(float64(time.Since(start).Nanoseconds())/1000000., 'f', 3, 32)
 	fields["_http_response_code_"] = strconv.Itoa(resp.StatusCode)
 
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		logger.Error(h.context.GetRuntimeContext(), "HTTP_PARSE_ALARM", "Read body of HTTP response failed", err)
 		fields["_result_"] = "invalid_body"
@@ -294,7 +293,7 @@ func (h *Response) httpGather(address string) (map[string]string, error) {
 }
 
 // Collect gets all metric fields and tags and returns any errors it encounters
-func (h *Response) Collect(collector ilogtail.Collector) error {
+func (h *Response) Collect(collector pipeline.Collector) error {
 	// should not occur
 	if h.tags == nil || h.client == nil {
 		return nil
@@ -326,7 +325,7 @@ func (h *Response) Collect(collector ilogtail.Collector) error {
 }
 
 func init() {
-	ilogtail.MetricInputs["metric_http"] = func() ilogtail.MetricInput {
+	pipeline.MetricInputs["metric_http"] = func() pipeline.MetricInput {
 		return &Response{}
 	}
 }

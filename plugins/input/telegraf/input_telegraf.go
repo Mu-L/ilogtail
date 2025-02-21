@@ -15,8 +15,8 @@
 package telegraf
 
 import (
-	"github.com/alibaba/ilogtail"
-	pluginmanager "github.com/alibaba/ilogtail/pluginmanager"
+	"github.com/alibaba/ilogtail/pkg/config"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 
 	"path"
 )
@@ -25,11 +25,11 @@ type ServiceTelegraf struct {
 	Detail string
 
 	config  *Config
-	context ilogtail.Context
+	context pipeline.Context
 	tm      *Manager
 }
 
-func (s *ServiceTelegraf) Init(ctx ilogtail.Context) (int, error) {
+func (s *ServiceTelegraf) Init(ctx pipeline.Context) (int, error) {
 	// TODO: validate Detail
 
 	s.context = ctx
@@ -37,8 +37,7 @@ func (s *ServiceTelegraf) Init(ctx ilogtail.Context) (int, error) {
 		Name:   ctx.GetConfigName(),
 		Detail: s.Detail,
 	}
-	s.tm = GetTelegrafManager(path.Join(
-		pluginmanager.LogtailGlobalConfig.LogtailSysConfDir, "telegraf"))
+	s.tm = GetTelegrafManager(path.Join(config.LoongcollectorGlobalConfig.LoongCollectorThirdPartyDir, "telegraf"))
 	return 0, nil
 }
 
@@ -46,22 +45,22 @@ func (s *ServiceTelegraf) Description() string {
 	return "service for Telegraf agent"
 }
 
-func (s *ServiceTelegraf) Collect(collector ilogtail.Collector) error {
+func (s *ServiceTelegraf) Collect(collector pipeline.Collector) error {
 	return nil
 }
 
-func (s *ServiceTelegraf) Start(collector ilogtail.Collector) error {
-	s.tm.RegisterConfig(s.config)
+func (s *ServiceTelegraf) Start(collector pipeline.Collector) error {
+	s.tm.RegisterConfig(s.context, s.config)
 	return nil
 }
 
 func (s *ServiceTelegraf) Stop() error {
-	s.tm.UnregisterConfig(s.config)
+	s.tm.UnregisterConfig(s.context, s.config)
 	return nil
 }
 
 func init() {
-	ilogtail.ServiceInputs["service_telegraf"] = func() ilogtail.ServiceInput {
+	pipeline.ServiceInputs["service_telegraf"] = func() pipeline.ServiceInput {
 		return &ServiceTelegraf{}
 	}
 }
