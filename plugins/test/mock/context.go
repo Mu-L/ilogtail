@@ -17,31 +17,31 @@ package mock
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg"
+	"github.com/alibaba/ilogtail/pkg/config"
 	"github.com/alibaba/ilogtail/pkg/logger"
-	"github.com/alibaba/ilogtail/pkg/protocol"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
 
 func NewEmptyContext(project, logstore, configName string) *EmptyContext {
 	ctx, c := pkg.NewLogtailContextMetaWithoutAlarm(project, logstore, configName)
-	return &EmptyContext{
-		ctx:            ctx,
-		common:         c,
-		StringMetrics:  make(map[string]ilogtail.StringMetric),
-		CounterMetrics: make(map[string]ilogtail.CounterMetric),
-		LatencyMetrics: make(map[string]ilogtail.LatencyMetric),
-		checkpoint:     make(map[string][]byte),
+	emptyContext := EmptyContext{
+		ctx:        ctx,
+		common:     c,
+		checkpoint: make(map[string][]byte),
 	}
+
+	emptyContext.RegisterMetricRecord(make([]pipeline.LabelPair, 0))
+	return &emptyContext
 }
 
 type EmptyContext struct {
-	StringMetrics  map[string]ilogtail.StringMetric
-	CounterMetrics map[string]ilogtail.CounterMetric
-	LatencyMetrics map[string]ilogtail.LatencyMetric
+	MetricsRecords             []*pipeline.MetricsRecord
+	logstoreConfigMetricRecord *pipeline.MetricsRecord
 
 	common      *pkg.LogtailContextMeta
 	ctx         context.Context
@@ -49,7 +49,7 @@ type EmptyContext struct {
 	pluginNames string
 }
 
-var contextMutex sync.Mutex
+var contextMutex sync.RWMutex
 
 func (p *EmptyContext) GetConfigName() string {
 	return p.common.GetConfigName()
@@ -59,6 +59,10 @@ func (p *EmptyContext) GetProject() string {
 }
 func (p *EmptyContext) GetLogstore() string {
 	return p.common.GetLogStore()
+}
+
+func (p *EmptyContext) GetPipelineScopeConfig() *config.GlobalConfig {
+	return &config.GlobalConfig{}
 }
 
 func (p *EmptyContext) AddPlugin(name string) {
@@ -73,61 +77,52 @@ func (p *EmptyContext) InitContext(project, logstore, configName string) {
 	p.ctx, p.common = pkg.NewLogtailContextMetaWithoutAlarm(project, logstore, configName)
 }
 
-func (p *EmptyContext) RegisterCounterMetric(metric ilogtail.CounterMetric) {
+func (p *EmptyContext) RegisterMetricRecord(labels []pipeline.LabelPair) *pipeline.MetricsRecord {
 	contextMutex.Lock()
 	defer contextMutex.Unlock()
-	if p.CounterMetrics == nil {
-		p.CounterMetrics = make(map[string]ilogtail.CounterMetric)
+
+	metricsRecord := &pipeline.MetricsRecord{
+		Context: p,
+		Labels:  labels,
 	}
-	p.CounterMetrics[metric.Name()] = metric
+
+	p.MetricsRecords = append(p.MetricsRecords, metricsRecord)
+	return metricsRecord
 }
 
-func (p *EmptyContext) RegisterStringMetric(metric ilogtail.StringMetric) {
-	contextMutex.Lock()
-	defer contextMutex.Unlock()
-	if p.StringMetrics == nil {
-		p.StringMetrics = make(map[string]ilogtail.StringMetric)
+func (p *EmptyContext) RegisterLogstoreConfigMetricRecord(labels []pipeline.LabelPair) *pipeline.MetricsRecord {
+	p.logstoreConfigMetricRecord = &pipeline.MetricsRecord{
+		Context: p,
+		Labels:  labels,
 	}
-	p.StringMetrics[metric.Name()] = metric
+	return p.logstoreConfigMetricRecord
 }
 
-func (p *EmptyContext) RegisterLatencyMetric(metric ilogtail.LatencyMetric) {
-	contextMutex.Lock()
-	defer contextMutex.Unlock()
-	if p.LatencyMetrics == nil {
-		p.LatencyMetrics = make(map[string]ilogtail.LatencyMetric)
+func (p *EmptyContext) GetMetricRecord() *pipeline.MetricsRecord {
+	contextMutex.RLock()
+	if len(p.MetricsRecords) > 0 {
+		defer contextMutex.RUnlock()
+		return p.MetricsRecords[len(p.MetricsRecords)-1]
 	}
-	p.LatencyMetrics[metric.Name()] = metric
+	contextMutex.RUnlock()
+	return p.RegisterMetricRecord(nil)
 }
 
-func (p *EmptyContext) MetricSerializeToPB(log *protocol.Log) {
-	if log == nil {
-		return
+func (p *EmptyContext) GetLogstoreConfigMetricRecord() *pipeline.MetricsRecord {
+	return p.logstoreConfigMetricRecord
+}
+
+// ExportMetricRecords is used for exporting metrics records.
+// Each metric is a map[string]string
+func (p *EmptyContext) ExportMetricRecords() []map[string]string {
+	contextMutex.RLock()
+	defer contextMutex.RUnlock()
+
+	records := make([]map[string]string, 0)
+	for _, metricsRecord := range p.MetricsRecords {
+		records = append(records, metricsRecord.ExportMetricRecords())
 	}
-	log.Contents = append(log.Contents, &protocol.Log_Content{Key: "project", Value: p.GetProject()})
-	log.Contents = append(log.Contents, &protocol.Log_Content{Key: "logstore", Value: p.GetLogstore()})
-	log.Contents = append(log.Contents, &protocol.Log_Content{Key: "config", Value: p.GetConfigName()})
-	log.Contents = append(log.Contents, &protocol.Log_Content{Key: "plugins", Value: p.pluginNames})
-	contextMutex.Lock()
-	defer contextMutex.Unlock()
-	if p.CounterMetrics != nil {
-		for _, value := range p.CounterMetrics {
-			value.Serialize(log)
-			value.Clear(0)
-		}
-	}
-	if p.StringMetrics != nil {
-		for _, value := range p.StringMetrics {
-			value.Serialize(log)
-			value.Set("")
-		}
-	}
-	if p.LatencyMetrics != nil {
-		for _, value := range p.LatencyMetrics {
-			value.Serialize(log)
-			value.Clear()
-		}
-	}
+	return records
 }
 
 func (p *EmptyContext) SaveCheckPoint(key string, value []byte) error {
@@ -165,4 +160,25 @@ func (p *EmptyContext) GetCheckPointObject(key string, obj interface{}) (exist b
 
 func (p *EmptyContext) GetRuntimeContext() context.Context {
 	return p.ctx
+}
+
+func (p *EmptyContext) GetExtension(name string, cfg any) (pipeline.Extension, error) {
+	creator, ok := pipeline.Extensions[name]
+	if !ok {
+		return nil, fmt.Errorf("extension %s not found", name)
+	}
+	extension := creator()
+	config, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(config, extension)
+	if err != nil {
+		return nil, err
+	}
+	err = extension.Init(p)
+	if err != nil {
+		return nil, err
+	}
+	return extension, nil
 }

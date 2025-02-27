@@ -14,67 +14,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-function run() {
-  name=$1
-  command=$2
-  echo "========================================="
-  echo "$name testing case"
-  echo "========================================="
-  eval "$command"
-  if [ $? = 1 ]; then
-      echo "========================================="
-      echo "$name testing case failed"
-      echo "========================================="
-      exit 1
-  fi
-}
-
-# There are 2 kinds of test, which are e2e and performance.
+# There are 3 kinds of test, which are e2e, core and performance.
 TYPE=$1
 TEST_SCOPE=$2
 
 ROOT_DIR=$(cd $(dirname "${BASH_SOURCE[0]}") && cd .. && pwd)
 TESTDIR=$ROOT_DIR/test
-TEST_HOME=$ROOT_DIR/$TYPE-test
-
-rm -rf "$TEST_HOME"
-mkdir "$TEST_HOME"
 
 cd "$TESTDIR"
-go build -v -o "$TEST_HOME"/ilogtail-test-tool "$TESTDIR"
-
-if [ $? != 0 ]; then
-  echo "build ilogtail e2e engine failed"
-  exit 1
-fi
-
-cd "$TEST_HOME"
-
-prefix="./ilogtail-test-tool start"
-if [ "$TEST_DEBUG" = "true" ]; then
-  prefix=$prefix" --debug"
-fi
-if [ "$TEST_PROFILE" = "true" ]; then
-  prefix=$prefix" --profile"
-fi
-
-if [ "$TEST_SCOPE" = "all" ]; then
-  ls "$TESTDIR"/case/"$TYPE" | while read case
-  do
-    command=$prefix" -c $TESTDIR/case/$TYPE/$case"
-    run "$case" "$command"
-    if [ $? = 1 ]; then
-      exit 1
-    fi
-  done
+if [ "$TEST_SCOPE" = "core" ]; then
+  go test -v -timeout 30m -run ^TestE2EOnDockerComposeCore$ github.com/alibaba/ilogtail/test/$TYPE
+elif [ "$TEST_SCOPE" = "performance" ]; then
+  go test -v -timeout 30m -run ^TestE2EOnDockerComposePerformance$ github.com/alibaba/ilogtail/test/$TYPE
 else
-  command=$prefix" -c $TESTDIR/case/$TYPE/$TEST_SCOPE"
-  run "$TEST_SCOPE" "$command"
+  go test -v -timeout 30m -run ^TestE2EOnDockerCompose$ github.com/alibaba/ilogtail/test/$TYPE
 fi
 
 if [ $? = 0 ]; then
-  sh "$ROOT_DIR"/scripts/e2e-coverage.sh "$TYPE"-test
+  sh "$ROOT_DIR"/scripts/e2e_coverage.sh "$TYPE"
   echo "========================================="
   echo "All testing cases are passed"
   echo "========================================="
+else
+  exit 1
 fi

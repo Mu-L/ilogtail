@@ -24,17 +24,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 	"strings"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 )
 
 const (
-	pluginName       = "processor_encrypt"
+	pluginType       = "processor_encrypt"
 	defaultAlarmType = "PROCESSOR_ENCRYPT_ALARM"
 	encryptErrorText = "ENCRYPT_ERROR"
 )
@@ -60,21 +59,18 @@ type ProcessorEncrypt struct {
 	EncryptionParameters   *EncryptionInfo
 	KeepSourceValueIfError bool
 
-	context   ilogtail.Context
+	context   pipeline.Context
 	keyDict   map[string]bool
 	cipher    cipher.Block
 	blockSize int
 	key       []byte
 	iv        []byte
-
-	encryptedCountMetric ilogtail.CounterMetric
-	encryptedBytesMetric ilogtail.CounterMetric
 }
 
-func (p *ProcessorEncrypt) Init(context ilogtail.Context) error {
+func (p *ProcessorEncrypt) Init(context pipeline.Context) error {
 	p.context = context
 	if len(p.SourceKeys) == 0 {
-		return fmt.Errorf("plugin %v must specify SourceKey", pluginName)
+		return fmt.Errorf("plugin %v must specify SourceKey", pluginType)
 	}
 	p.keyDict = make(map[string]bool)
 	for _, key := range p.SourceKeys {
@@ -86,14 +82,11 @@ func (p *ProcessorEncrypt) Init(context ilogtail.Context) error {
 	if err := p.parseIV(); err != nil {
 		return err
 	}
-
-	p.encryptedCountMetric = helper.NewCounterMetricAndRegister("encrypted_count", p.context)
-	p.encryptedBytesMetric = helper.NewCounterMetricAndRegister("encrypted_bytes", p.context)
 	return nil
 }
 
 func (*ProcessorEncrypt) Description() string {
-	return fmt.Sprintf("processor %v is used to encrypt data with AES CBC", pluginName)
+	return fmt.Sprintf("processor %v is used to encrypt data with AES CBC", pluginType)
 }
 
 func (p *ProcessorEncrypt) ProcessLogs(logArray []*protocol.Log) []*protocol.Log {
@@ -107,15 +100,13 @@ func (p *ProcessorEncrypt) ProcessLogs(logArray []*protocol.Log) []*protocol.Log
 }
 
 // @return (the index of encrypted field,  -1 means not found
-//          any error,  nil if the field is not found)
+// any error,  nil if the field is not found)
 func (p *ProcessorEncrypt) processLog(log *protocol.Log) {
 	for _, cont := range log.Contents {
 		if _, exists := p.keyDict[cont.Key]; !exists {
 			continue
 		}
 
-		p.encryptedCountMetric.Add(1)
-		p.encryptedBytesMetric.Add(int64(len(cont.Value)))
 		ciphertext, err := p.encrypt(cont.Value)
 		if err == nil {
 			cont.Value = hex.EncodeToString(ciphertext)
@@ -161,18 +152,18 @@ func (p *ProcessorEncrypt) paddingWithPKCS7(data string) []byte {
 
 func (p *ProcessorEncrypt) parseKey() error {
 	if len(p.EncryptionParameters.Key) == 0 && len(p.EncryptionParameters.KeyFilePath) == 0 {
-		return fmt.Errorf("plugin %v must specify Key or KeyFilePath", pluginName)
+		return fmt.Errorf("plugin %v must specify Key or KeyFilePath", pluginType)
 	}
 	var err error
 	if len(p.EncryptionParameters.KeyFilePath) > 0 {
 		// Key is stored in local file in JSON format, load from file.
 		var fileBytes []byte
-		if fileBytes, err = ioutil.ReadFile(p.EncryptionParameters.KeyFilePath); err == nil {
+		if fileBytes, err = os.ReadFile(p.EncryptionParameters.KeyFilePath); err == nil {
 			err = json.Unmarshal(fileBytes, p.EncryptionParameters)
 		}
 		if err != nil {
 			return fmt.Errorf("plugin %v loads key file %v error: %v",
-				pluginName, p.EncryptionParameters.KeyFilePath, err)
+				pluginType, p.EncryptionParameters.KeyFilePath, err)
 		}
 
 		logger.Infof(p.context.GetRuntimeContext(), "read key from file %v, hash: %v", p.EncryptionParameters.KeyFilePath,
@@ -181,10 +172,10 @@ func (p *ProcessorEncrypt) parseKey() error {
 
 	// Decode from hex to bytes.
 	if p.key, err = hex.DecodeString(p.EncryptionParameters.Key); err != nil {
-		return fmt.Errorf("plugin %v decodes key from hex error: %v, try hex", pluginName, err)
+		return fmt.Errorf("plugin %v decodes key from hex error: %v, try hex", pluginType, err)
 	}
 	if p.cipher, err = aes.NewCipher(p.key); err != nil {
-		return fmt.Errorf("plugin %s create cipher with key error: %v", pluginName, err)
+		return fmt.Errorf("plugin %s create cipher with key error: %v", pluginType, err)
 	}
 	p.blockSize = p.cipher.BlockSize()
 	return nil
@@ -192,7 +183,7 @@ func (p *ProcessorEncrypt) parseKey() error {
 
 func (p *ProcessorEncrypt) parseIV() error {
 	if len(p.EncryptionParameters.IV) == 0 {
-		return fmt.Errorf("plugin %s must specify IV", pluginName)
+		return fmt.Errorf("plugin %s must specify IV", pluginType)
 		// [DISABLED] Random IV
 		// logger.Infof("IV is not specified, use random IV and prepend it to ciphertext")
 		// return nil
@@ -200,11 +191,11 @@ func (p *ProcessorEncrypt) parseIV() error {
 
 	var err error
 	if p.iv, err = hex.DecodeString(p.EncryptionParameters.IV); err != nil {
-		return fmt.Errorf("plugin %v decodes IV %v error: %v", pluginName, p.EncryptionParameters.IV, err)
+		return fmt.Errorf("plugin %v decodes IV %v error: %v", pluginType, p.EncryptionParameters.IV, err)
 	}
 	if len(p.iv) != p.blockSize {
 		return fmt.Errorf("plugin %v finds size mismatch between IV(%v) and BlockSize(%v), must be same",
-			pluginName, len(p.iv), p.blockSize)
+			pluginType, len(p.iv), p.blockSize)
 	}
 	return nil
 }
@@ -217,7 +208,7 @@ func newProcessorEncrypt() *ProcessorEncrypt {
 }
 
 func init() {
-	ilogtail.Processors[pluginName] = func() ilogtail.Processor {
+	pipeline.Processors[pluginType] = func() pipeline.Processor {
 		return newProcessorEncrypt()
 	}
 }

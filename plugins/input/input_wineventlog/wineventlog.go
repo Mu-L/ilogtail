@@ -12,23 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build windows
 // +build windows
 
 package input_wineventlog
 
 import (
 	"fmt"
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/pkg/logger"
-	"github.com/alibaba/ilogtail/pkg/util"
-	"github.com/alibaba/ilogtail/plugins/input/input_wineventlog/eventlog"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
+	"github.com/alibaba/ilogtail/pkg/util"
+	"github.com/alibaba/ilogtail/plugins/input/input_wineventlog/eventlog"
 )
 
 const (
-	pluginName = "service_wineventlog"
+	pluginType = "service_wineventlog"
 )
 
 // WinEventLog represents the plugin to collect Windows event logs.
@@ -69,8 +71,8 @@ type WinEventLog struct {
 
 	shutdown  chan struct{}
 	waitGroup sync.WaitGroup
-	context   ilogtail.Context
-	collector ilogtail.Collector
+	context   pipeline.Context
+	collector pipeline.Collector
 
 	checkpoint         eventlog.Checkpoint
 	lastCheckpointTime time.Time
@@ -79,7 +81,7 @@ type WinEventLog struct {
 }
 
 // Init ...
-func (w *WinEventLog) Init(context ilogtail.Context) (int, error) {
+func (w *WinEventLog) Init(context pipeline.Context) (int, error) {
 	w.context = context
 
 	if "" == w.Name {
@@ -112,12 +114,12 @@ func (w *WinEventLog) Description() string {
 }
 
 // Collect ...
-func (w *WinEventLog) Collect(collector ilogtail.Collector) error {
+func (w *WinEventLog) Collect(collector pipeline.Collector) error {
 	return nil
 }
 
 // Start ...
-func (w *WinEventLog) Start(collector ilogtail.Collector) error {
+func (w *WinEventLog) Start(collector pipeline.Collector) error {
 	w.collector = collector
 	w.initCheckpoint()
 	w.shutdown = make(chan struct{}, 1)
@@ -158,7 +160,7 @@ func (w *WinEventLog) run() bool {
 		return true
 	}
 	defer func() {
-		logger.Infof(w.context.GetRuntimeContext(), "%s Stopping %v", w.logPrefix, pluginName)
+		logger.Infof(w.context.GetRuntimeContext(), "%s Stopping %v", w.logPrefix, pluginType)
 		err := w.eventLogger.Close()
 		if err != nil {
 			logger.Warningf(w.context.GetRuntimeContext(), "WINEVENTLOG_MAIN_ALARM", "%s Close() error", w.logPrefix, err)
@@ -207,7 +209,7 @@ func (w *WinEventLog) run() bool {
 }
 
 func (w *WinEventLog) initCheckpoint() {
-	checkpointKey := pluginName + "_" + w.Name
+	checkpointKey := pluginType + "_" + w.Name
 	ok := w.context.GetCheckPointObject(checkpointKey, &w.checkpoint)
 	if ok {
 		logger.Infof(w.context.GetRuntimeContext(), "%s Checkpoint loaded: %v", w.logPrefix, w.checkpoint)
@@ -216,7 +218,7 @@ func (w *WinEventLog) initCheckpoint() {
 }
 
 func (w *WinEventLog) saveCheckpoint() {
-	checkpointKey := pluginName + "_" + w.Name
+	checkpointKey := pluginType + "_" + w.Name
 	w.context.SaveCheckPointObject(checkpointKey, &w.checkpoint)
 }
 
@@ -229,7 +231,7 @@ func newWinEventLog() *WinEventLog {
 }
 
 func init() {
-	ilogtail.ServiceInputs[pluginName] = func() ilogtail.ServiceInput {
+	pipeline.ServiceInputs[pluginType] = func() pipeline.ServiceInput {
 		return newWinEventLog()
 	}
 }

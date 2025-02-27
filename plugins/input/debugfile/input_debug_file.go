@@ -15,28 +15,48 @@
 package debugfile
 
 import (
-	"io/ioutil"
+	"bufio"
+	"os"
+	"strings"
+	"time"
 
-	"github.com/alibaba/ilogtail"
+	"github.com/alibaba/ilogtail/pkg/models"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
+	"github.com/alibaba/ilogtail/pkg/util"
 )
 
-// InputDebugFile can reads all data in specified file, and set them as single field.
+// InputDebugFile can reads some lines from head in specified file, then set them as same field.
 type InputDebugFile struct {
 	InputFilePath string
 	FieldName     string
+	LineLimit     int
 
-	context ilogtail.Context
-	content string
+	context pipeline.Context
+	logs    []string
 }
 
 // Init ...
-func (r *InputDebugFile) Init(context ilogtail.Context) (int, error) {
+func (r *InputDebugFile) Init(context pipeline.Context) (int, error) {
 	r.context = context
-	content, err := ioutil.ReadFile(r.InputFilePath)
+	file, err := os.Open(r.InputFilePath)
 	if err != nil {
 		return 0, err
 	}
-	r.content = string(content)
+	defer file.Close() //nolint:gosec
+
+	scanner := bufio.NewScanner(file)
+	var count int
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		r.logs = append(r.logs, line)
+		count++
+
+		if count == r.LineLimit {
+			break
+		}
+	}
+
 	return 0, nil
 }
 
@@ -46,15 +66,29 @@ func (r *InputDebugFile) Description() string {
 }
 
 // Collect ...
-func (r *InputDebugFile) Collect(collector ilogtail.Collector) error {
+func (r *InputDebugFile) Collect(collector pipeline.Collector) error {
 	log := map[string]string{}
-	log[r.FieldName] = r.content
+	log[r.FieldName] = strings.Join(r.logs, "\n")
 	collector.AddData(nil, log)
+
+	return nil
+}
+
+func (r *InputDebugFile) Read(context pipeline.PipelineContext) error {
+	body := strings.Join(r.logs, "\n")
+	log := models.NewLog("debug_log", util.ZeroCopyStringToBytes(body), "info", "", "", models.NewTags(), uint64(time.Now().Unix()))
+	if r.FieldName != models.BodyKey {
+		log.Contents.Add(r.FieldName, body)
+	}
+	context.Collector().Collect(&models.GroupInfo{}, log)
 	return nil
 }
 
 func init() {
-	ilogtail.MetricInputs["metric_debug_file"] = func() ilogtail.MetricInput {
-		return &InputDebugFile{FieldName: "content"}
+	pipeline.MetricInputs["metric_debug_file"] = func() pipeline.MetricInput {
+		return &InputDebugFile{
+			FieldName: models.ContentKey,
+			LineLimit: 1000,
+		}
 	}
 }

@@ -15,51 +15,38 @@
 package pluginmanager
 
 import (
-	"github.com/alibaba/ilogtail/helper"
-	"github.com/alibaba/ilogtail/main/flags"
-	"github.com/alibaba/ilogtail/pkg/logger"
-
 	"context"
+	"fmt"
 	"runtime"
 	"runtime/debug"
 	"sync"
 	"time"
+
+	"github.com/alibaba/ilogtail/pkg/config"
+	"github.com/alibaba/ilogtail/pkg/flags"
+	"github.com/alibaba/ilogtail/pkg/helper"
+	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 )
 
 // Following variables are exported so that tests of main package can reference them.
+var LogtailConfigLock sync.RWMutex
 var LogtailConfig map[string]*LogstoreConfig
-var LastLogtailConfig map[string]*LogstoreConfig
 
-// Two built-in logtail configs to report statistics and alarm (from system and other logtail configs).
-var StatisticsConfig *LogstoreConfig
-var AlarmConfig *LogstoreConfig
+// Configs that are inited and will be started.
+// One config may have multiple Go pipelines, such as ContainerInfo (with input) and static file (without input).
+var ToStartPipelineConfigWithInput *LogstoreConfig
+var ToStartPipelineConfigWithoutInput *LogstoreConfig
+var ContainerConfig *LogstoreConfig
 
 // Configs that were disabled because of slow or hang config.
-var DisabledLogtailConfigLock sync.Mutex
-var DisabledLogtailConfig = make(map[string]*LogstoreConfig)
+var DisabledLogtailConfigLock sync.RWMutex
+var DisabledLogtailConfig = make(map[*LogstoreConfig]struct{})
 
-// StatisticsConfigJson, AlarmConfigJson
-var BaseVersion = "0.1.0"
+var LastUnsendBuffer = make(map[string]PluginRunner)
 
-var statisticsConfigJSON = `{
-    "global": {
-        "InputIntervalMs" :  60000,
-        "AggregatIntervalMs": 1000,
-        "FlushIntervalMs": 1000,
-        "DefaultLogQueueSize": 4,
-		"DefaultLogGroupQueueSize": 4,
-		"Tags" : {
-			"base_version" : "0.1.0",
-			"logtail_version" : "0.16.19"
-		}
-	},
-	"inputs" : [
-		{
-			"type" : "metric_statistics",
-			"detail" : null
-		}
-	]
-}`
+// Two built-in logtail configs to report statistics and alarm (from system and other logtail configs).
+var AlarmConfig *LogstoreConfig
 
 var alarmConfigJSON = `{
     "global": {
@@ -69,8 +56,8 @@ var alarmConfigJSON = `{
         "DefaultLogQueueSize": 4,
 		"DefaultLogGroupQueueSize": 4,
 		"Tags" : {
-			"base_version" : "0.1.0",
-			"logtail_version" : "0.16.19"
+			"base_version" : "` + config.BaseVersion + `",
+			"` + config.LoongcollectorGlobalConfig.LoongCollectorVersionTag + `" : "` + config.BaseVersion + `"
 		}
     },
 	"inputs" : [
@@ -81,11 +68,31 @@ var alarmConfigJSON = `{
 	]
 }`
 
-func panicRecover(pluginName string) {
+var containerConfigJSON = `{
+    "global": {
+        "InputIntervalMs" :  30000,
+        "AggregatIntervalMs": 1000,
+        "FlushIntervalMs": 1000,
+        "DefaultLogQueueSize": 4,
+		"DefaultLogGroupQueueSize": 4,
+		"Tags" : {
+			"base_version" : "` + config.BaseVersion + `",
+			"` + config.LoongcollectorGlobalConfig.LoongCollectorVersionTag + `" : "` + config.BaseVersion + `"
+		}
+    },
+	"inputs" : [
+		{
+			"type" : "metric_container",
+			"detail" : null
+		}
+	]
+}`
+
+func panicRecover(pluginType string) {
 	if err := recover(); err != nil {
 		trace := make([]byte, 2048)
 		runtime.Stack(trace, true)
-		logger.Error(context.Background(), "PLUGIN_RUNTIME_ALARM", "plugin", pluginName, "panicked", err, "stack", string(trace))
+		logger.Error(context.Background(), "PLUGIN_RUNTIME_ALARM", "plugin", pluginType, "panicked", err, "stack", string(trace))
 	}
 }
 
@@ -96,45 +103,40 @@ func Init() (err error) {
 	if err = CheckPointManager.Init(); err != nil {
 		return
 	}
-	if StatisticsConfig, err = loadBuiltinConfig("statistics", "sls-admin", "logtail_plugin_profile",
-		"shennong_log_profile", statisticsConfigJSON); err != nil {
-		logger.Error(context.Background(), "LOAD_PLUGIN_ALARM", "load statistics config fail", err)
-		return
-	}
 	if AlarmConfig, err = loadBuiltinConfig("alarm", "sls-admin", "logtail_alarm",
 		"logtail_alarm", alarmConfigJSON); err != nil {
 		logger.Error(context.Background(), "LOAD_PLUGIN_ALARM", "load alarm config fail", err)
 		return
 	}
+	if ContainerConfig, err = loadBuiltinConfig("container", "sls-admin", "logtail_containers", "logtail_containers", containerConfigJSON); err != nil {
+		logger.Error(context.Background(), "LOAD_PLUGIN_ALARM", "load container config fail", err)
+		return
+	}
+	logger.Info(context.Background(), "loadBuiltinConfig container")
 	return
 }
 
 // timeoutStop wrappers LogstoreConfig.Stop with timeout (5s by default).
 // @return true if Stop returns before timeout, otherwise false.
-func timeoutStop(config *LogstoreConfig, flag bool) bool {
-	if !flag && config.GlobalConfig.AlwaysOnline {
-		config.pause()
-		GetAlwaysOnlineManager().AddCachedConfig(config, time.Duration(config.GlobalConfig.DelayStopSec)*time.Second)
-		logger.Info(config.Context.GetRuntimeContext(), "Pause config and add into always online manager", "done")
-		return true
-	}
-
+func timeoutStop(config *LogstoreConfig, removedFlag bool) bool {
 	done := make(chan int)
 	go func() {
-		logger.Info(config.Context.GetRuntimeContext(), "Stop config in goroutine", "begin")
-		_ = config.Stop(flag)
+		addressStr := fmt.Sprintf("%p", config)
+		logger.Info(config.Context.GetRuntimeContext(), "Stop config in goroutine", "begin", "LogstoreConfig", addressStr)
+		_ = config.Stop(removedFlag)
 		close(done)
-		logger.Info(config.Context.GetRuntimeContext(), "Stop config in goroutine", "end")
-
+		logger.Info(context.Background(), "Stop config in goroutine", "end", "LogstoreConfig", addressStr)
 		// The config is valid but stop slowly, allow it to load again.
 		DisabledLogtailConfigLock.Lock()
-		if _, exists := DisabledLogtailConfig[config.ConfigName]; !exists {
+		if _, exists := DisabledLogtailConfig[config]; !exists {
 			DisabledLogtailConfigLock.Unlock()
 			return
 		}
-		delete(DisabledLogtailConfig, config.ConfigName)
+		logger.Info(context.Background(), "Valid but slow stop config", config.ConfigName, "LogstoreConfig", addressStr)
+		DeleteLogstoreConfig(config, removedFlag)
+		delete(DisabledLogtailConfig, config)
+
 		DisabledLogtailConfigLock.Unlock()
-		logger.Info(config.Context.GetRuntimeContext(), "Valid but slow stop config, enable it again", config.ConfigName)
 	}()
 	select {
 	case <-done:
@@ -144,84 +146,184 @@ func timeoutStop(config *LogstoreConfig, flag bool) bool {
 	}
 }
 
-// HoldOn stops all config instance and checkpoint manager so that it is ready
-//   to load new configs or quit.
+// StopAllPipelines stops all pipelines so that it is ready
+// to quit.
 // For user-defined config, timeoutStop is used to avoid hanging.
-func HoldOn(exitFlag bool) error {
+func StopAllPipelines(withInput bool) error {
 	defer panicRecover("Run plugin")
-
-	for _, logstoreConfig := range LogtailConfig {
-		if hasStopped := timeoutStop(logstoreConfig, exitFlag); !hasStopped {
-			// TODO: This alarm can not be sent to server in current alarm design.
-			logger.Error(logstoreConfig.Context.GetRuntimeContext(), "CONFIG_STOP_TIMEOUT_ALARM",
-				"timeout when stop config, goroutine might leak")
-			DisabledLogtailConfigLock.Lock()
-			DisabledLogtailConfig[logstoreConfig.ConfigName] = logstoreConfig
-			DisabledLogtailConfigLock.Unlock()
-		}
-	}
-	if StatisticsConfig != nil {
-		if *flags.ForceSelfCollect {
-			logger.Info(context.Background(), "force collect the static metrics")
-			for _, plugin := range StatisticsConfig.MetricPlugins {
-				_ = plugin.Input.Collect(plugin)
+	LogtailConfigLock.Lock()
+	toDeleteConfigNames := make(map[string]struct{})
+	for configName, logstoreConfig := range LogtailConfig {
+		needStop := false
+		if withInput {
+			// if request is withinput=true, only stop logstoreConfig.PluginRunner.IsWithInputPlugin=true
+			if logstoreConfig.PluginRunner.IsWithInputPlugin() {
+				needStop = true
+			}
+		} else {
+			// if request is withinput=false, only stop logstoreConfig.PluginRunner.IsWithInputPlugin=false
+			if !logstoreConfig.PluginRunner.IsWithInputPlugin() {
+				needStop = true
 			}
 		}
-		_ = StatisticsConfig.Stop(exitFlag)
-	}
-	if AlarmConfig != nil {
-		if *flags.ForceSelfCollect {
-			logger.Info(context.Background(), "force collect the alarm metrics")
-			for _, plugin := range AlarmConfig.MetricPlugins {
-				_ = plugin.Input.Collect(plugin)
+		if needStop {
+			logger.Info(logstoreConfig.Context.GetRuntimeContext(), "Stop config", configName)
+			if hasStopped := timeoutStop(logstoreConfig, true); !hasStopped {
+				// TODO: This alarm can not be sent to server in current alarm design.
+				logger.Error(logstoreConfig.Context.GetRuntimeContext(), "CONFIG_STOP_TIMEOUT_ALARM",
+					"timeout when stop config, goroutine might leak")
+				// TODO: The key should be versioned. Current implementation will overwrite the previous version when reload a block config multiple times.
+				DisabledLogtailConfigLock.Lock()
+				DisabledLogtailConfig[logstoreConfig] = struct{}{}
+				DisabledLogtailConfigLock.Unlock()
+			} else {
+				DeleteLogstoreConfig(logstoreConfig, true)
 			}
+			toDeleteConfigNames[configName] = struct{}{}
 		}
-		_ = AlarmConfig.Stop(exitFlag)
 	}
-	// clear all config
-	LastLogtailConfig = LogtailConfig
-	LogtailConfig = make(map[string]*LogstoreConfig)
-	CheckPointManager.HoldOn()
+	for key := range toDeleteConfigNames {
+		delete(LogtailConfig, key)
+	}
+	LogtailConfigLock.Unlock()
 	return nil
 }
 
-// Resume starts all configs.
-func Resume() error {
-	defer panicRecover("Run plugin")
-	if StatisticsConfig != nil {
-		StatisticsConfig.Start()
+func DeleteLogstoreConfig(config *LogstoreConfig, removedFlag bool) {
+	if actualObject, ok := config.Context.(*ContextImp); ok {
+		actualObject.logstoreC = nil
 	}
-	if AlarmConfig != nil {
-		AlarmConfig.Start()
-	}
-
-	// Remove deleted configs from online manager.
-	deletedCachedConfigs := GetAlwaysOnlineManager().GetDeletedConfigs(LogtailConfig)
-	for _, cfg := range deletedCachedConfigs {
-		go func(config *LogstoreConfig) {
-			defer panicRecover(config.ConfigName)
-			logger.Infof(config.Context.GetRuntimeContext(), "always online config %v is deleted, stop it", config.ConfigName)
-			err := config.Stop(true)
-			logger.Infof(config.Context.GetRuntimeContext(), "always online config %v stopped, error: %v", config.ConfigName, err)
-		}(cfg)
-	}
-
-	for _, logstoreConfig := range LogtailConfig {
-		if logstoreConfig.alreadyStarted {
-			logstoreConfig.resume()
-			continue
+	config.Context = nil
+	if runner, ok := config.PluginRunner.(*pluginv1Runner); ok {
+		for _, obj := range runner.MetricPlugins {
+			obj.Config = nil
 		}
-		logstoreConfig.Start()
+		for _, obj := range runner.ServicePlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.ProcessorPlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.AggregatorPlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.FlusherPlugins {
+			obj.Config = nil
+		}
+		runner.LogstoreConfig = nil
+	} else if runner, ok := config.PluginRunner.(*pluginv2Runner); ok {
+		for _, obj := range runner.MetricPlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.ServicePlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.ProcessorPlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.AggregatorPlugins {
+			obj.Config = nil
+		}
+		for _, obj := range runner.FlusherPlugins {
+			obj.Config = nil
+		}
+		runner.LogstoreConfig = nil
 	}
+	if !removedFlag {
+		LastUnsendBuffer[config.ConfigName] = config.PluginRunner
+	}
+	config.PluginRunner = nil
+}
 
-	err := CheckPointManager.Init()
-	if err != nil {
-		logger.Error(context.Background(), "CHECKPOINT_INIT_ALARM", "init checkpoint manager error", err)
+func DeleteLogstoreConfigFromLogtailConfig(configName string, removedFlag bool) {
+	LogtailConfigLock.Lock()
+	if config, ok := LogtailConfig[configName]; ok {
+		DeleteLogstoreConfig(config, removedFlag)
+		delete(LogtailConfig, configName)
 	}
-	CheckPointManager.Resume()
-	// clear last logtail config
-	LastLogtailConfig = make(map[string]*LogstoreConfig)
-	return nil
+	LogtailConfigLock.Unlock()
+}
+
+// StopBuiltInModulesConfig stops built-in services (self monitor, alarm, container and checkpoint manager).
+func StopBuiltInModulesConfig() {
+	if AlarmConfig != nil {
+		if *flags.ForceSelfCollect {
+			logger.Info(context.Background(), "force collect the alarm metrics")
+			control := pipeline.NewAsyncControl()
+			AlarmConfig.PluginRunner.RunPlugins(pluginMetricInput, control)
+			control.WaitCancel()
+		}
+		_ = AlarmConfig.Stop(true)
+		AlarmConfig = nil
+	}
+	if ContainerConfig != nil {
+		if *flags.ForceSelfCollect {
+			logger.Info(context.Background(), "force collect the container metrics")
+			control := pipeline.NewAsyncControl()
+			ContainerConfig.PluginRunner.RunPlugins(pluginMetricInput, control)
+			control.WaitCancel()
+		}
+		_ = ContainerConfig.Stop(true)
+		ContainerConfig = nil
+	}
+	CheckPointManager.Stop()
+}
+
+// Stop stop the given config. ConfigName is with suffix.
+func Stop(configName string, removedFlag bool) error {
+	defer panicRecover("Run plugin")
+	LogtailConfigLock.RLock()
+	if config, exists := LogtailConfig[configName]; exists {
+		LogtailConfigLock.RUnlock()
+		if hasStopped := timeoutStop(config, removedFlag); !hasStopped {
+			logger.Error(config.Context.GetRuntimeContext(), "CONFIG_STOP_TIMEOUT_ALARM",
+				"timeout when stop config, goroutine might leak")
+			DisabledLogtailConfigLock.Lock()
+			DisabledLogtailConfig[config] = struct{}{}
+			DisabledLogtailConfigLock.Unlock()
+			LogtailConfigLock.Lock()
+			delete(LogtailConfig, configName)
+			LogtailConfigLock.Unlock()
+		} else {
+			logger.Info(config.Context.GetRuntimeContext(), "Stop config now", configName)
+			LogtailConfigLock.Lock()
+			DeleteLogstoreConfig(config, removedFlag)
+			delete(LogtailConfig, configName)
+			LogtailConfigLock.Unlock()
+		}
+		return nil
+	}
+	LogtailConfigLock.RUnlock()
+	return fmt.Errorf("config not found: %s", configName)
+}
+
+// Start starts the given config. ConfigName is with suffix.
+func Start(configName string) error {
+	defer panicRecover("Run plugin")
+	if ToStartPipelineConfigWithInput != nil && ToStartPipelineConfigWithInput.ConfigNameWithSuffix == configName {
+		ToStartPipelineConfigWithInput.Start()
+		LogtailConfigLock.Lock()
+		LogtailConfig[ToStartPipelineConfigWithInput.ConfigNameWithSuffix] = ToStartPipelineConfigWithInput
+		LogtailConfigLock.Unlock()
+		ToStartPipelineConfigWithInput = nil
+		return nil
+	} else if ToStartPipelineConfigWithoutInput != nil && ToStartPipelineConfigWithoutInput.ConfigNameWithSuffix == configName {
+		ToStartPipelineConfigWithoutInput.Start()
+		LogtailConfigLock.Lock()
+		LogtailConfig[ToStartPipelineConfigWithoutInput.ConfigNameWithSuffix] = ToStartPipelineConfigWithoutInput
+		LogtailConfigLock.Unlock()
+		ToStartPipelineConfigWithoutInput = nil
+		return nil
+	}
+	// should never happen
+	var loadedConfigName string
+	if ToStartPipelineConfigWithInput != nil {
+		loadedConfigName = ToStartPipelineConfigWithInput.ConfigNameWithSuffix
+	}
+	if ToStartPipelineConfigWithoutInput != nil {
+		loadedConfigName += " " + ToStartPipelineConfigWithoutInput.ConfigNameWithSuffix
+	}
+	return fmt.Errorf("config unmatch with the loaded pipeline: given %s, expect %s", configName, loadedConfigName)
 }
 
 func init() {

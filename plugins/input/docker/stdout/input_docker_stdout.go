@@ -15,22 +15,23 @@
 package stdout
 
 import (
-	"os"
+	"fmt"
 	"regexp"
 	"sync"
 	"time"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
-	"github.com/alibaba/ilogtail/pkg/logger"
-	"github.com/alibaba/ilogtail/plugins/input"
+	"github.com/docker/docker/api/types"
 
-	docker "github.com/fsouza/go-dockerclient"
+	"github.com/alibaba/ilogtail/pkg/helper"
+	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
+	"github.com/alibaba/ilogtail/pkg/util"
+	"github.com/alibaba/ilogtail/plugins/input"
 )
 
 const serviceDockerStdoutKey = "service_docker_stdout_v2"
 
-func logDriverSupported(container *docker.Container) bool {
+func logDriverSupported(container types.ContainerJSON) bool {
 	// containerd has no hostConfig, return true
 	if container.HostConfig == nil {
 		return true
@@ -43,6 +44,10 @@ func logDriverSupported(container *docker.Container) bool {
 	}
 }
 
+func logPathEmpty(container types.ContainerJSON) bool {
+	return len(container.LogPath) == 0
+}
+
 type DockerFileSyner struct {
 	dockerFileReader    *helper.LogFileReader
 	dockerFileProcessor *DockerStdoutProcessor
@@ -51,7 +56,7 @@ type DockerFileSyner struct {
 
 func NewDockerFileSynerByFile(sds *ServiceDockerStdout, filePath string) *DockerFileSyner {
 	dockerInfoDetail := &helper.DockerInfoDetail{}
-	dockerInfoDetail.ContainerInfo = &docker.Container{}
+	dockerInfoDetail.ContainerInfo = types.ContainerJSON{}
 	dockerInfoDetail.ContainerInfo.LogPath = filePath
 	sds.LogtailInDocker = false
 	sds.StartLogMaxOffset = 10 * 1024 * 1024 * 1024
@@ -69,8 +74,12 @@ func NewDockerFileSyner(sds *ServiceDockerStdout,
 		}
 	}
 
+	source := util.NewPackIDPrefix(info.ContainerInfo.ID + sds.context.GetConfigName())
 	tags := info.GetExternalTags(sds.ExternalEnvTag, sds.ExternalK8sLabelTag)
-	processor := NewDockerStdoutProcessor(reg, time.Duration(sds.BeginLineTimeoutMs)*time.Millisecond, sds.BeginLineCheckLength, sds.MaxLogSize, sds.Stdout, sds.Stderr, sds.context, sds.collector, tags)
+	for k, v := range info.ContainerNameTag {
+		tags[k] = v
+	}
+	processor := NewDockerStdoutProcessor(reg, time.Duration(sds.BeginLineTimeoutMs)*time.Millisecond, sds.BeginLineCheckLength, sds.MaxLogSize, sds.Stdout, sds.Stderr, sds.context, sds.collector, tags, source)
 
 	checkpoint, ok := checkpointMap[info.ContainerInfo.ID]
 	if !ok {
@@ -81,9 +90,9 @@ func NewDockerFileSyner(sds *ServiceDockerStdout,
 		}
 
 		// first watch this container
-		stat, err := os.Stat(checkpoint.Path)
-		if err != nil {
-			logger.Warning(sds.context.GetRuntimeContext(), "DOCKER_STDOUT_STAT_ALARM", "stat log file error, path", checkpoint.Path, "error", err.Error())
+		realPath, stat := helper.TryGetRealPath(checkpoint.Path)
+		if realPath == "" {
+			logger.Warning(sds.context.GetRuntimeContext(), "DOCKER_STDOUT_STAT_ALARM", "stat log file error, path", checkpoint.Path, "error", "path not found")
 		} else {
 			checkpoint.Offset = stat.Size()
 			if checkpoint.Offset > sds.StartLogMaxOffset {
@@ -93,18 +102,25 @@ func NewDockerFileSyner(sds *ServiceDockerStdout,
 				checkpoint.Offset = 0
 			}
 			checkpoint.State = helper.GetOSState(stat)
+			checkpoint.Path = realPath
 		}
 	}
 	if sds.CloseUnChangedSec < 10 {
 		sds.CloseUnChangedSec = 10
 	}
+
+	logger.Info(sds.context.GetRuntimeContext(), "new stdout reader id", info.IDPrefix(),
+		"name", info.ContainerInfo.Name, "created", info.ContainerInfo.Created, "status", info.Status(),
+		"checkpoint_logpath", checkpoint.Path,
+		"in_docker", sds.LogtailInDocker)
+
 	config := helper.LogFileReaderConfig{
 		ReadIntervalMs:   sds.ReadIntervalMs,
 		MaxReadBlockSize: sds.MaxLogSize,
 		CloseFileSec:     sds.CloseUnChangedSec,
 		Tracker:          sds.tracker,
 	}
-	reader, _ := helper.NewLogFileReader(checkpoint, config, processor, sds.context)
+	reader, _ := helper.NewLogFileReader(sds.context.GetRuntimeContext(), checkpoint, config, processor)
 
 	return &DockerFileSyner{
 		dockerFileReader:    reader,
@@ -114,8 +130,8 @@ func NewDockerFileSyner(sds *ServiceDockerStdout,
 }
 
 type ServiceDockerStdout struct {
-	IncludeLabel          map[string]string `comment:"include container label for selector. [Deprecated： use IncludeContainerLabel and IncludeK8sLabel instead]"`
-	ExcludeLabel          map[string]string `comment:"exclude container label for selector. [Deprecated： use ExcludeContainerLabel and ExcludeK8sLabel instead]"`
+	IncludeLabel          map[string]string `comment:"include container label for selector. [Deprecated: use IncludeContainerLabel and IncludeK8sLabel instead]"`
+	ExcludeLabel          map[string]string `comment:"exclude container label for selector. [Deprecated: use ExcludeContainerLabel and ExcludeK8sLabel instead]"`
 	IncludeEnv            map[string]string `comment:"the container would be selected when it is matched by any environment rules. Furthermore, the regular expression starts with '^' is supported as the env value, such as 'ENVA:^DE.*$'' would hit all containers having any envs starts with DE."`
 	ExcludeEnv            map[string]string `comment:"the container would be excluded when it is matched by any environment rules. Furthermore, the regular expression starts with '^' is supported as the env value, such as 'ENVA:^DE.*$'' would hit all containers having any envs starts with DE."`
 	IncludeContainerLabel map[string]string `comment:"the container would be selected when it is matched by any container labels. Furthermore, the regular expression starts with '^' is supported as the label value, such as 'LABEL:^DE.*$'' would hit all containers having any labels starts with DE."`
@@ -124,9 +140,9 @@ type ServiceDockerStdout struct {
 	ExcludeK8sLabel       map[string]string `comment:"the container of pod would be excluded when it is matched by any exclude k8s label rules. Furthermore, the regular expression starts with '^' is supported as the value to exclude pods."`
 	ExternalEnvTag        map[string]string `comment:"extract the env value as the log tags for one container, such as the value of ENVA would be appended to the 'taga' of log tags when configured 'ENVA:taga' pair."`
 	ExternalK8sLabelTag   map[string]string `comment:"extract the pod label value as the log tags for one container, such as the value of LABELA would be appended to the 'taga' of log tags when configured 'LABELA:taga' pair."`
-	FlushIntervalMs       int               `comment:"the interval of container discovery，and the timeunit is millisecond. Default value is 3000."`
-	ReadIntervalMs        int               `comment:"the interval of read stdout log，and the timeunit is millisecond. Default value is 1000."`
-	SaveCheckPointSec     int               `comment:"the interval of save checkpoint，and the timeunit is second. Default value is 60."`
+	FlushIntervalMs       int               `comment:"the interval of container discovery, and the timeunit is millisecond. Default value is 3000."`
+	ReadIntervalMs        int               `comment:"the interval of read stdout log, and the timeunit is millisecond. Default value is 1000."`
+	SaveCheckPointSec     int               `comment:"the interval of save checkpoint, and the timeunit is second. Default value is 60."`
 	BeginLineRegex        string            `comment:"the regular expression of begin line for the multi line log."`
 	BeginLineTimeoutMs    int               `comment:"the maximum timeout milliseconds for begin line match. Default value is 3000."`
 	BeginLineCheckLength  int               `comment:"the prefix length of log line to match the first line. Default value is 10240."`
@@ -149,52 +165,45 @@ type ServiceDockerStdout struct {
 
 	// for tracker
 	tracker           *helper.ReaderMetricTracker
-	avgInstanceMetric ilogtail.CounterMetric
-	addMetric         ilogtail.CounterMetric
-	deleteMetric      ilogtail.CounterMetric
+	avgInstanceMetric pipeline.CounterMetric
+	addMetric         pipeline.CounterMetric
+	deleteMetric      pipeline.CounterMetric
 
 	synerMap      map[string]*DockerFileSyner
 	checkpointMap map[string]helper.LogFileReaderCheckPoint
-	dockerCenter  *helper.DockerCenter
 	shutdown      chan struct {
 	}
 	waitGroup sync.WaitGroup
-	context   ilogtail.Context
-	collector ilogtail.Collector
+	context   pipeline.Context
+	collector pipeline.Collector
 
 	// Last return of GetAllAcceptedInfoV2
-	fullList       map[string]bool
-	matchList      map[string]*helper.DockerInfoDetail
-	lastUpdateTime int64
+	fullList              map[string]bool
+	matchList             map[string]*helper.DockerInfoDetail
+	lastUpdateTime        int64
+	CollectContainersFlag bool
 }
 
-func (sds *ServiceDockerStdout) Init(context ilogtail.Context) (int, error) {
+func (sds *ServiceDockerStdout) Init(context pipeline.Context) (int, error) {
 	sds.context = context
-	sds.dockerCenter = helper.GetDockerCenterInstance()
+	helper.ContainerCenterInit()
 	sds.fullList = make(map[string]bool)
 	sds.matchList = make(map[string]*helper.DockerInfoDetail)
 	sds.synerMap = make(map[string]*DockerFileSyner)
+
 	if sds.MaxLogSize < 1024 {
 		sds.MaxLogSize = 1024
 	}
 	if sds.MaxLogSize > 1024*1024*20 {
 		sds.MaxLogSize = 1024 * 1024 * 20
 	}
-	sds.tracker = helper.NewReaderMetricTracker()
-	sds.context.RegisterCounterMetric(sds.tracker.CloseCounter)
-	sds.context.RegisterCounterMetric(sds.tracker.OpenCounter)
-	sds.context.RegisterCounterMetric(sds.tracker.ReadSizeCounter)
-	sds.context.RegisterCounterMetric(sds.tracker.ReadCounter)
-	sds.context.RegisterCounterMetric(sds.tracker.FileSizeCounter)
-	sds.context.RegisterCounterMetric(sds.tracker.FileRotatorCounter)
-	sds.context.RegisterLatencyMetric(sds.tracker.ProcessLatency)
 
-	sds.avgInstanceMetric = helper.NewAverageMetric("container_count")
-	sds.addMetric = helper.NewCounterMetric("add_container")
-	sds.deleteMetric = helper.NewCounterMetric("remove_container")
-	sds.context.RegisterCounterMetric(sds.avgInstanceMetric)
-	sds.context.RegisterCounterMetric(sds.addMetric)
-	sds.context.RegisterCounterMetric(sds.deleteMetric)
+	metricsRecord := sds.context.GetMetricRecord()
+	sds.tracker = helper.NewReaderMetricTracker(metricsRecord)
+
+	sds.avgInstanceMetric = helper.NewAverageMetricAndRegister(metricsRecord, helper.MetricPluginContainerTotal)
+	sds.addMetric = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginAddContainerTotal)
+	sds.deleteMetric = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginRemoveContainerTotal)
 
 	var err error
 	sds.IncludeEnv, sds.IncludeEnvRegex, err = helper.SplitRegexFromMap(sds.IncludeEnv)
@@ -229,7 +238,6 @@ func (sds *ServiceDockerStdout) Init(context ilogtail.Context) (int, error) {
 		logger.Warning(sds.context.GetRuntimeContext(), "INVALID_REGEX_ALARM", "init exclude label regex error", err)
 	}
 	sds.K8sFilter, err = helper.CreateK8SFilter(sds.K8sNamespaceRegex, sds.K8sPodRegex, sds.K8sContainerRegex, sds.IncludeK8sLabel, sds.ExcludeK8sLabel)
-
 	return 0, err
 }
 
@@ -237,12 +245,12 @@ func (sds *ServiceDockerStdout) Description() string {
 	return "the container stdout input plugin for iLogtail, which supports docker and containerd."
 }
 
-func (sds *ServiceDockerStdout) Collect(ilogtail.Collector) error {
+func (sds *ServiceDockerStdout) Collect(pipeline.Collector) error {
 	return nil
 }
 
-func (sds *ServiceDockerStdout) FlushAll(c ilogtail.Collector, firstStart bool) error {
-	newUpdateTime := sds.dockerCenter.GetLastUpdateMapTime()
+func (sds *ServiceDockerStdout) FlushAll(c pipeline.Collector, firstStart bool) error {
+	newUpdateTime := helper.GetContainersLastUpdateTime()
 	if sds.lastUpdateTime != 0 {
 		if sds.lastUpdateTime >= newUpdateTime {
 			return nil
@@ -250,7 +258,7 @@ func (sds *ServiceDockerStdout) FlushAll(c ilogtail.Collector, firstStart bool) 
 	}
 
 	var err error
-	newCount, delCount := sds.dockerCenter.GetAllAcceptedInfoV2(
+	newCount, delCount, addResultList, deleteResultList := helper.GetContainerByAcceptedInfoV2(
 		sds.fullList, sds.matchList,
 		sds.IncludeLabel, sds.ExcludeLabel,
 		sds.IncludeLabelRegex, sds.ExcludeLabelRegex,
@@ -258,21 +266,57 @@ func (sds *ServiceDockerStdout) FlushAll(c ilogtail.Collector, firstStart bool) 
 		sds.IncludeEnvRegex, sds.ExcludeEnvRegex,
 		sds.K8sFilter)
 	sds.lastUpdateTime = newUpdateTime
+
+	if sds.CollectContainersFlag {
+		// record config result
+		{
+			keys := make([]string, 0, len(sds.matchList))
+			for k := range sds.matchList {
+				if len(k) > 0 {
+					keys = append(keys, helper.GetShortID(k))
+				}
+			}
+			configResult := &helper.ContainerConfigResult{
+				DataType:                   "container_config_result",
+				Project:                    sds.context.GetProject(),
+				Logstore:                   sds.context.GetLogstore(),
+				ConfigName:                 sds.context.GetConfigName(),
+				PathExistInputContainerIDs: helper.GetStringFromList(keys),
+				SourceAddress:              "stdout",
+				InputType:                  input.ServiceDockerStdoutPluginName,
+				FlusherType:                "flusher_sls",
+				FlusherTargetAddress:       fmt.Sprintf("%s/%s", sds.context.GetProject(), sds.context.GetLogstore()),
+			}
+			helper.RecordContainerConfigResultMap(configResult)
+			if newCount != 0 || delCount != 0 || firstStart {
+				helper.RecordContainerConfigResultIncrement(configResult)
+			}
+			logger.Debugf(sds.context.GetRuntimeContext(), "update match list, addResultList: %v, deleteResultList: %v", addResultList, deleteResultList)
+		}
+	}
+
 	if !firstStart && newCount == 0 && delCount == 0 {
+		logger.Debugf(sds.context.GetRuntimeContext(), "update match list, firstStart: %v, new: %v, delete: %v",
+			firstStart, newCount, delCount)
 		return nil
 	}
-	logger.Infof(sds.context.GetRuntimeContext(), "update match list, first: %v, new: %v, delete: %v",
+	logger.Infof(sds.context.GetRuntimeContext(), "update match list, firstStart: %v, new: %v, delete: %v",
 		firstStart, newCount, delCount)
 
 	dockerInfos := sds.matchList
-	logger.Debug(sds.context.GetRuntimeContext(), "flush all", len(dockerInfos))
+	logger.Debug(sds.context.GetRuntimeContext(), "match list length", len(dockerInfos))
 	sds.avgInstanceMetric.Add(int64(len(dockerInfos)))
 	for id, info := range dockerInfos {
 		if !logDriverSupported(info.ContainerInfo) {
 			continue
 		}
+		if logPathEmpty(info.ContainerInfo) {
+			continue
+		}
 		if _, ok := sds.synerMap[id]; !ok || firstStart {
 			syner := NewDockerFileSyner(sds, info, sds.checkpointMap)
+			logger.Info(sds.context.GetRuntimeContext(), "docker stdout", "added", "source host path", info.ContainerInfo.LogPath,
+				"id", info.IDPrefix(), "name", info.ContainerInfo.Name, "created", info.ContainerInfo.Created, "status", info.Status())
 			sds.addMetric.Add(1)
 			sds.synerMap[id] = syner
 			syner.dockerFileReader.Start()
@@ -282,7 +326,7 @@ func (sds *ServiceDockerStdout) FlushAll(c ilogtail.Collector, firstStart bool) 
 	// delete container
 	for id, syner := range sds.synerMap {
 		if _, ok := dockerInfos[id]; !ok {
-			logger.Info(sds.context.GetRuntimeContext(), "delete docker stdout, id", id, "name", syner.info.ContainerInfo.Name)
+			logger.Info(sds.context.GetRuntimeContext(), "docker stdout", "deleted", "id", helper.GetShortID(id), "name", syner.info.ContainerInfo.Name)
 			syner.dockerFileReader.Stop()
 			delete(sds.synerMap, id)
 			sds.deleteMetric.Add(1)
@@ -330,7 +374,7 @@ func (sds *ServiceDockerStdout) ClearUselessCheckpoint() {
 }
 
 // Start starts the ServiceInput's service, whatever that may be
-func (sds *ServiceDockerStdout) Start(c ilogtail.Collector) error {
+func (sds *ServiceDockerStdout) Start(c pipeline.Collector) error {
 	sds.collector = c
 	sds.shutdown = make(chan struct{})
 	sds.waitGroup.Add(1)
@@ -372,7 +416,7 @@ func (sds *ServiceDockerStdout) Stop() error {
 }
 
 func init() {
-	ilogtail.ServiceInputs[input.ServiceDockerStdoutPluginName] = func() ilogtail.ServiceInput {
+	pipeline.ServiceInputs[input.ServiceDockerStdoutPluginName] = func() pipeline.ServiceInput {
 		return &ServiceDockerStdout{
 			FlushIntervalMs:      3000,
 			SaveCheckPointSec:    60,

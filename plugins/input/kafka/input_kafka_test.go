@@ -21,11 +21,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alibaba/ilogtail/pkg/protocol"
-	pluginmanager "github.com/alibaba/ilogtail/pluginmanager"
-
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/alibaba/ilogtail/pkg/helper"
+	"github.com/alibaba/ilogtail/pkg/protocol"
+	pluginmanager "github.com/alibaba/ilogtail/pluginmanager"
 )
 
 type ContextTest struct {
@@ -67,14 +68,28 @@ type mockCollector struct {
 
 func (c *mockCollector) AddData(
 	tags map[string]string, fields map[string]string, t ...time.Time) {
-	c.logs = append(c.logs, &mockLog{tags, fields})
+	c.AddDataWithContext(tags, fields, nil, t...)
 }
 
 func (c *mockCollector) AddDataArray(
 	tags map[string]string, columns []string, values []string, t ...time.Time) {
+	c.AddDataArrayWithContext(tags, columns, values, nil, t...)
 }
 
 func (c *mockCollector) AddRawLog(log *protocol.Log) {
+	c.AddRawLogWithContext(log, nil)
+}
+
+func (c *mockCollector) AddDataWithContext(
+	tags map[string]string, fields map[string]string, ctx map[string]interface{}, t ...time.Time) {
+	c.logs = append(c.logs, &mockLog{tags, fields})
+}
+
+func (c *mockCollector) AddDataArrayWithContext(
+	tags map[string]string, columns []string, values []string, ctx map[string]interface{}, t ...time.Time) {
+}
+
+func (c *mockCollector) AddRawLogWithContext(log *protocol.Log, ctx map[string]interface{}) {
 
 }
 
@@ -84,7 +99,8 @@ func InvalidTestInputKafka(t *testing.T) {
 	_, input, err := newInput()
 	require.NoError(t, err)
 	collector := &mockCollector{}
-	err = input.Start(collector)
+	pipelineCxt := helper.NewGroupedPipelineContext()
+	err = input.StartService(pipelineCxt)
 	require.NoError(t, err)
 	time.Sleep(time.Second * 2)
 	assert.Equal(t, 2, len(collector.logs))

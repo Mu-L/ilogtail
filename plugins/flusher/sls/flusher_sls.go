@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build linux || windows
 // +build linux windows
 
 package sls
@@ -19,26 +20,23 @@ package sls
 import (
 	"fmt"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
 	"github.com/alibaba/ilogtail/pkg/logtail"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 	"github.com/alibaba/ilogtail/pkg/util"
 )
 
 // SlsFlusher uses symbols in LogtailAdaptor(.so) to flush log groups to Logtail.
-type SlsFlusher struct {
+type SlsFlusher struct { // nolint:revive
 	EnableShardHash bool
 	KeepShardHash   bool
 
-	context    ilogtail.Context
-	lenCounter ilogtail.CounterMetric
+	context pipeline.Context
 }
 
 // Init ...
-func (p *SlsFlusher) Init(context ilogtail.Context) error {
+func (p *SlsFlusher) Init(context pipeline.Context) error {
 	p.context = context
-	p.lenCounter = helper.NewCounterMetric("flush_sls_size")
 	return nil
 }
 
@@ -80,8 +78,6 @@ func (p *SlsFlusher) Flush(projectName string, logstoreName string, configName s
 		if err != nil {
 			return fmt.Errorf("loggroup marshal err %v", err)
 		}
-		bufLen := len(buf)
-		p.lenCounter.Add(int64(bufLen))
 
 		var rst int
 		if !p.EnableShardHash {
@@ -99,9 +95,9 @@ func (p *SlsFlusher) Flush(projectName string, logstoreName string, configName s
 
 // SetUrgent ...
 // We do nothing here because necessary flag has already been set in Logtail
-//   before this method is called. Any future call of IsReady will return
-//   true so that remaining data can be flushed to Logtail (which will flush
-//   data to local file system) before it quits.
+// before this method is called. Any future call of IsReady will return
+// true so that remaining data can be flushed to Logtail (which will flush
+// data to local file system) before it quits.
 func (*SlsFlusher) SetUrgent(flag bool) {
 }
 
@@ -112,7 +108,7 @@ func (*SlsFlusher) Stop() error {
 }
 
 func init() {
-	ilogtail.Flushers["flusher_sls"] = func() ilogtail.Flusher {
+	pipeline.Flushers["flusher_sls"] = func() pipeline.Flusher {
 		return &SlsFlusher{
 			EnableShardHash: false,
 			KeepShardHash:   true,

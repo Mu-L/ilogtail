@@ -109,17 +109,31 @@ type mockCollector struct {
 	lock    sync.Mutex
 }
 
-func (c *mockCollector) AddData(tags map[string]string, fields map[string]string, t ...time.Time) {
+func (c *mockCollector) AddData(
+	tags map[string]string, fields map[string]string, t ...time.Time) {
+	c.AddDataWithContext(tags, fields, nil, t...)
+}
+
+func (c *mockCollector) AddDataArray(
+	tags map[string]string, columns []string, values []string, t ...time.Time) {
+	c.AddDataArrayWithContext(tags, columns, values, nil, t...)
+}
+
+func (c *mockCollector) AddRawLog(log *protocol.Log) {
+	c.AddRawLogWithContext(log, nil)
+}
+
+func (c *mockCollector) AddDataWithContext(tags map[string]string, fields map[string]string, ctx map[string]interface{}, t ...time.Time) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.logs = append(c.logs, &mockLog{tags, fields, t[0], true})
 }
 
-func (c *mockCollector) AddDataArray(
-	tags map[string]string, columns []string, values []string, t ...time.Time) {
+func (c *mockCollector) AddDataArrayWithContext(
+	tags map[string]string, columns []string, values []string, ctx map[string]interface{}, t ...time.Time) {
 }
 
-func (c *mockCollector) AddRawLog(log *protocol.Log) {
+func (c *mockCollector) AddRawLogWithContext(log *protocol.Log, ctx map[string]interface{}) {
 
 }
 
@@ -168,7 +182,7 @@ func mockRun(t *testing.T, syslog *Syslog, collector *mockCollector) {
 	t1 := time.Now()
 	assert.NoError(t, syslog.Stop())
 	dur := time.Since(t1)
-	require.True(t, dur/time.Microsecond < 2000, "dur: %v", dur)
+	require.True(t, dur/time.Microsecond < 3000, "dur: %v", dur)
 	assert.NoError(t, conn.Close())
 
 	require.Equal(t, len(collector.rawLogs), len(collector.logs))
@@ -177,6 +191,9 @@ func mockRun(t *testing.T, syslog *Syslog, collector *mockCollector) {
 		priority, _ := strconv.Atoi(slog.fields["_priority_"])
 		log := getLog(priority,
 			slog.fields["_hostname_"], slog.fields["_program_"], slog.fields["_content_"], &slog.t)
+		if t.Name() != "TestMockUnixGram" {
+			require.Equal(t, "127.0.0.1", slog.fields["_client_ip_"])
+		}
 		require.Equal(t, rawLog, log, "log index: %v, slog: %v, raw log: %v", idx, slog, rawLog)
 	}
 

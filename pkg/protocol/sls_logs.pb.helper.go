@@ -9,6 +9,7 @@ import (
 func CloneLog(log *Log) *Log {
 	cloneLog := &Log{
 		Time:     log.Time,
+		TimeNs:   log.TimeNs,
 		Contents: make([]*Log_Content, len(log.Contents), cap(log.Contents)),
 	}
 	for i, content := range log.Contents {
@@ -18,6 +19,15 @@ func CloneLog(log *Log) *Log {
 		}
 	}
 	return cloneLog
+}
+
+func SetLogTime(log *Log, second uint32) {
+	log.Time = second
+}
+
+func SetLogTimeWithNano(log *Log, second uint32, nanosecond uint32) {
+	log.Time = second
+	log.TimeNs = &nanosecond
 }
 
 type Codec struct{}

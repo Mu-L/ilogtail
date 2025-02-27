@@ -61,7 +61,8 @@ var OtSpanTagsMapping = map[string]string{
 func ParseSegment(span *v3.SpanObject, segment *v3.SegmentObject, cache *ResourcePropertiesCache, mapping map[int32]string) *OtSpan {
 	resource := cache.get(segment.Service, segment.ServiceInstance)
 	if resource == nil {
-		return nil
+		cache.put(segment.Service, segment.GetServiceInstance(), make(map[string]string))
+		resource = cache.get(segment.Service, segment.ServiceInstance)
 	}
 
 	otSpan := NewOtSpan()
@@ -153,7 +154,39 @@ func ParseSegment(span *v3.SpanObject, segment *v3.SegmentObject, cache *Resourc
 	} else {
 		otSpan.StatusCode = StatusCodeOk
 	}
+
+	switch {
+	case span.SpanLayer == v3.SpanLayer_MQ:
+		mappingMessageSystemTag(span, otSpan, mapping)
+	case span.SpanType == v3.SpanType_Exit:
+		mappingDatabaseTag(span, otSpan)
+	}
+
 	return otSpan
+}
+
+func mappingDatabaseTag(span *v3.SpanObject, otSpan *OtSpan) {
+	if span.GetPeer() == "" {
+		return
+	}
+
+	if span.SpanLayer != v3.SpanLayer_Database {
+		return
+	}
+
+	var dbType string
+	for _, tag := range span.GetTags() {
+		if tag.Key == "db.type" {
+			dbType = tag.Value
+			break
+		}
+	}
+
+	if dbType == "" {
+		return
+	}
+
+	otSpan.Attribute[AttributeDBConnectionString] = strings.ToLower(dbType) + "://" + span.GetPeer()
 }
 
 func mappingMessageSystemTag(span *v3.SpanObject, otSpan *OtSpan, mapping map[int32]string) {

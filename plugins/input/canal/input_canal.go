@@ -23,9 +23,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/util"
 
 	"github.com/go-mysql-org/go-mysql/canal"
@@ -66,7 +66,7 @@ func (p *LogCanal) Fire(e *canalLog.Entry) error {
 type CheckPoint struct {
 	GTID     string
 	FileName string
-	Offset   int
+	Offset   uint32
 	ID       int
 }
 
@@ -119,7 +119,7 @@ type ServiceCanal struct {
 	// - If any of them are invalid, plugins starts synchronization from latest (failover).
 	StartGTID       string
 	StartBinName    string
-	StartBinLogPos  int
+	StartBinLogPos  uint32
 	HeartBeatPeriod int
 	ReadTimeout     int
 	EnableDDL       bool
@@ -141,33 +141,34 @@ type ServiceCanal struct {
 	Charset           string
 	// Pack values into two fields: new_data and old_data. False by default.
 	PackValues bool
+	// True时 binlog解析DECIMAL输出原格式而非科学计数法, like:https://github.com/go-mysql-org/go-mysql/blob/6c99b4bff931a5aced0978b78aadb5867afcdcd3/canal/dump.go#L85
+	UseDecimal bool
 
 	shutdown  chan struct{}
 	waitGroup sync.WaitGroup
 
 	isGTIDEnabled      bool
-	nextRowEventGTID   string
+	nextRowEventGTID   string // update before data is consumed
 	config             *canal.Config
 	canal              *canal.Canal
-	checkpoint         CheckPoint
-	lastOffsetString   string
-	context            ilogtail.Context
-	collector          ilogtail.Collector
+	checkpoint         CheckPoint // update checkpoint after data is consumed
+	context            pipeline.Context
+	collector          pipeline.Collector
 	lastCheckPointTime time.Time
 	lastErrorCount     int
 	lastErrorChan      chan error
 
-	rotateCounter     ilogtail.CounterMetric
-	syncCounter       ilogtail.CounterMetric
-	ddlCounter        ilogtail.CounterMetric
-	rowCounter        ilogtail.CounterMetric
-	xgidCounter       ilogtail.CounterMetric
-	checkpointCounter ilogtail.CounterMetric
-	lastBinLogMetric  ilogtail.StringMetric
-	lastGTIDMetric    ilogtail.StringMetric
+	rotateCounter     pipeline.CounterMetric
+	syncCounter       pipeline.CounterMetric
+	ddlCounter        pipeline.CounterMetric
+	rowCounter        pipeline.CounterMetric
+	xgidCounter       pipeline.CounterMetric
+	checkpointCounter pipeline.CounterMetric
+	lastBinLogMetric  pipeline.StringMetric
+	lastGTIDMetric    pipeline.StringMetric
 }
 
-func (sc *ServiceCanal) Init(context ilogtail.Context) (int, error) {
+func (sc *ServiceCanal) Init(context pipeline.Context) (int, error) {
 	sc.context = context
 	if sc.ReadTimeout < 1 {
 		sc.ReadTimeout = 120
@@ -189,17 +190,19 @@ func (sc *ServiceCanal) Init(context ilogtail.Context) (int, error) {
 	sc.config.DiscardNoMetaRowEvent = true
 	sc.config.IncludeTableRegex = sc.IncludeTables
 	sc.config.ExcludeTableRegex = sc.ExcludeTables
+	sc.config.UseDecimal = sc.UseDecimal
 
 	sc.lastErrorChan = make(chan error, 1)
 
-	sc.rotateCounter = helper.NewCounterMetricAndRegister("binlog_rotate", context)
-	sc.syncCounter = helper.NewCounterMetricAndRegister("binlog_sync", context)
-	sc.ddlCounter = helper.NewCounterMetricAndRegister("binlog_ddl", context)
-	sc.rowCounter = helper.NewCounterMetricAndRegister("binlog_row", context)
-	sc.xgidCounter = helper.NewCounterMetricAndRegister("binlog_xgid", context)
-	sc.checkpointCounter = helper.NewCounterMetricAndRegister("binlog_checkpoint", context)
-	sc.lastBinLogMetric = helper.NewStringMetricAndRegister("binlog_filename", context)
-	sc.lastGTIDMetric = helper.NewStringMetricAndRegister("binlog_gtid", context)
+	metricsRecord := context.GetMetricRecord()
+	sc.rotateCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogRotate)
+	sc.syncCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogSync)
+	sc.ddlCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogDdl)
+	sc.rowCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogRow)
+	sc.xgidCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogXgid)
+	sc.checkpointCounter = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginBinlogCheckpoint)
+	sc.lastBinLogMetric = helper.NewStringMetricAndRegister(metricsRecord, helper.MetricPluginBinlogFilename)
+	sc.lastGTIDMetric = helper.NewStringMetricAndRegister(metricsRecord, helper.MetricPluginBinlogGtid)
 
 	return 0, nil
 }
@@ -260,23 +263,18 @@ ValueLoop:
 	sc.collector.AddData(nil, packedData)
 }
 
-func (sc *ServiceCanal) OnRotate(r *replication.RotateEvent) error {
+func (sc *ServiceCanal) OnRotate(_ *replication.EventHeader, r *replication.RotateEvent) error {
 	logger.Info(sc.context.GetRuntimeContext(), "bin log file rotate", string(r.NextLogName), "pos", r.Position)
 	sc.lastBinLogMetric.Set(string(r.NextLogName))
 	sc.rotateCounter.Add(1)
-	sc.checkpoint.FileName = string(r.NextLogName)
-	sc.checkpoint.Offset = int(r.Position)
-	sc.lastOffsetString = strconv.Itoa(int(r.Position))
-	sc.saveCheckPoint()
 	return nil
 }
 
 // OnDDL...
-func (sc *ServiceCanal) OnDDL(pos mysql.Position, e *replication.QueryEvent) error {
-	// logger.Debug("on ddl event", *e)
+func (sc *ServiceCanal) OnDDL(_ *replication.EventHeader, pos mysql.Position, e *replication.QueryEvent) error {
+	logger.Debugf(sc.context.GetRuntimeContext(), "[CANAL_DEBUG] OnDDL:%v GTID:%v Pos:%v", string(e.Query), sc.nextRowEventGTID, pos.Pos)
 	sc.ddlCounter.Add(1)
 	if !sc.EnableDDL {
-		sc.syncCheckpointWithCanal()
 		return nil
 	}
 	values := map[string]string{
@@ -288,13 +286,13 @@ func (sc *ServiceCanal) OnDDL(pos mysql.Position, e *replication.QueryEvent) err
 		"StatusVars":    string(e.StatusVars),
 		"_event_":       "ddl",
 	}
+	nextOffsetString := strconv.FormatUint(uint64(pos.Pos), 10)
 	if sc.EnableGTID {
 		values["_gtid_"] = sc.nextRowEventGTID
 		values["_filename_"] = sc.checkpoint.FileName
-		values["_offset_"] = sc.lastOffsetString
+		values["_offset_"] = nextOffsetString
 	}
 	sc.addData(values)
-	sc.syncCheckpointWithCanal()
 	return nil
 }
 
@@ -346,13 +344,14 @@ func (sc *ServiceCanal) columnValueToString(column *schema.TableColumn, rowVal i
 
 // OnRow processes the row event, according user's config, constructs data to send.
 func (sc *ServiceCanal) OnRow(e *canal.RowsEvent) error {
-	// logger.Debug("OnRow", *e, "GTID", sc.nextRowEventGTID)
+	logger.Debug(sc.context.GetRuntimeContext(), "[CANAL_DEBUG] host", sc.Host, "db", e.Table.Schema, "table", e.Table.Name, "action", e.Action, "GTID", sc.nextRowEventGTID)
 	sc.rowCounter.Add(1)
 	values := map[string]string{"_host_": sc.Host, "_db_": e.Table.Schema, "_table_": e.Table.Name, "_event_": "row_" + e.Action, "_id_": strconv.Itoa(sc.checkpoint.ID)}
+	nextOffsetString := strconv.FormatUint(uint64(e.Header.LogPos), 10)
 	if sc.EnableGTID {
 		values["_gtid_"] = sc.nextRowEventGTID
 		values["_filename_"] = sc.checkpoint.FileName
-		values["_offset_"] = sc.lastOffsetString
+		values["_offset_"] = nextOffsetString
 	}
 	if sc.EnableEventMeta && e.Header != nil {
 		values["_event_time_"] = strconv.Itoa(int(e.Header.Timestamp))
@@ -362,12 +361,10 @@ func (sc *ServiceCanal) OnRow(e *canal.RowsEvent) error {
 	}
 	if e.Action == canal.UpdateAction {
 		if !sc.EnableUpdate {
-			sc.syncCheckpointWithCanal()
 			return nil
 		}
 		if len(e.Rows)%2 != 0 {
 			logger.Error(sc.context.GetRuntimeContext(), "CANAL_INVALID_ALARM", "invalid update value count", len(e.Rows))
-			sc.syncCheckpointWithCanal()
 			return nil
 		}
 		for i := 0; i < len(e.Rows); i += 2 {
@@ -418,12 +415,10 @@ func (sc *ServiceCanal) OnRow(e *canal.RowsEvent) error {
 	} else {
 		if e.Action == canal.DeleteAction {
 			if !sc.EnableDelete {
-				sc.syncCheckpointWithCanal()
 				return nil
 			}
 		} else {
 			if !sc.EnableInsert {
-				sc.syncCheckpointWithCanal()
 				return nil
 			}
 		}
@@ -458,13 +453,23 @@ func (sc *ServiceCanal) OnRow(e *canal.RowsEvent) error {
 	}
 
 	// Update checkpoint.
-	sc.syncCheckpointWithCanal()
 	sc.checkpoint.ID++
 	return nil
 }
 
-func (sc *ServiceCanal) OnXID(p mysql.Position) error {
-	// logger.Debug("OnXID", p)
+/*
+	  What is an XID_EVENT?
+		An XID_EVENT marks the end of a transaction that has been committed. It signifies that the transaction has been fully completed and can be safely replicated to a slave server. When a transaction is committed in a MySQL server, an XID_EVENT is written to the binlog to signify that the commit operation has been successfully completed.
+
+		When will an XID_EVENT be triggered?
+		An XID_EVENT is triggered and written to the binlog in the following scenarios:
+
+		Commit of a Transaction: When a transaction is committed in InnoDB or another transactional storage engine, an XID_EVENT is written to the binlog. This happens at the end of the transaction, indicating that all changes within that transaction are now complete and consistent.
+
+		Replication: During replication, the slave server reads the XID_EVENT to understand that a transaction has been committed on the master. This helps in maintaining transactional consistency between the master and the slave.
+*/
+func (sc *ServiceCanal) OnXID(_ *replication.EventHeader, p mysql.Position) error {
+	logger.Debugf(sc.context.GetRuntimeContext(), "[CANAL_DEBUG] OnXID Pos:%v", p.String())
 	sc.xgidCounter.Add(1)
 	return nil
 }
@@ -477,30 +482,45 @@ func (sc *ServiceCanal) OnXID(p mysql.Position) error {
 // calls to OnRow will be filtered. So, if plugin restarts before the next
 // OnRow call comes, it will rerun from a old checkpoint.
 // But this should be trivial for cases that valid data comes continuously.
-func (sc *ServiceCanal) OnGTID(s mysql.GTIDSet) error {
-	// logger.Debug("OnGTID", s)
+func (sc *ServiceCanal) OnGTID(_ *replication.EventHeader, e mysql.BinlogGTIDEvent) error {
 	sc.xgidCounter.Add(1)
+	s, err := e.GTIDNext()
+	if err != nil {
+		return err
+	}
+	logger.Debugf(sc.context.GetRuntimeContext(), "[CANAL_DEBUG] OnGTID: %v", s.String())
 	sc.nextRowEventGTID = s.String()
 	return nil
 }
 
-func (sc *ServiceCanal) OnPosSynced(pos mysql.Position, _ mysql.GTIDSet, force bool) error {
-	// logger.Debug("OnPosSynced", pos, force)
+// OnPosSynced is called right after RotateEvent, XIDEvent and DDLEvent
+// If our handle do not return err, we do not need to save checkpoint in those handlers
+func (sc *ServiceCanal) OnPosSynced(_ *replication.EventHeader, pos mysql.Position, gset mysql.GTIDSet, force bool) error {
+	GTID := ""
+	if gset != nil {
+		GTID = gset.String()
+	}
+	logger.Debugf(sc.context.GetRuntimeContext(), "[CANAL_DEBUG] OnPosSynced. Position: %v GTID: %v", pos, GTID)
 	sc.syncCounter.Add(1)
 	sc.checkpoint.FileName = pos.Name
-	sc.checkpoint.Offset = int(pos.Pos)
-	sc.lastOffsetString = strconv.Itoa(int(pos.Pos))
+	sc.checkpoint.Offset = pos.Pos
+	if sc.checkpoint.GTID != "" && GTID != "" {
+		sc.checkpoint.GTID = GTID
+	}
 	nowTime := time.Now()
 	// save checkpoint 3 second per time
 	if nowTime.Sub(sc.lastCheckPointTime) > time.Duration(3)*time.Second ||
-		(force && nowTime.Sub(sc.lastCheckPointTime) > time.Duration(1)*time.Second) {
-		sc.lastCheckPointTime = nowTime
+		force {
 		sc.saveCheckPoint()
 	}
 	return nil
 }
 
-func (sc *ServiceCanal) OnTableChanged(schema string, table string) error {
+func (sc *ServiceCanal) OnRowsQueryEvent(_ *replication.RowsQueryEvent) error {
+	return nil
+}
+
+func (sc *ServiceCanal) OnTableChanged(_ *replication.EventHeader, _ string, _ string) error {
 	return nil
 }
 
@@ -524,19 +544,13 @@ func (sc *ServiceCanal) initCheckPoint() {
 
 func (sc *ServiceCanal) saveCheckPoint() {
 	sc.checkpointCounter.Add(1)
+	sc.lastCheckPointTime = time.Now()
 	_ = sc.context.SaveCheckPointObject("mysql_canal", &sc.checkpoint)
-}
-
-func (sc *ServiceCanal) syncCheckpointWithCanal() {
-	gset := sc.canal.SyncedGTIDSet()
-	if gset != nil {
-		sc.checkpoint.GTID = gset.String()
-	}
 }
 
 // Collect takes in an accumulator and adds the metrics that the Input
 // gathers. This is called every "interval"
-func (sc *ServiceCanal) Collect(ilogtail.Collector) error {
+func (sc *ServiceCanal) Collect(pipeline.Collector) error {
 	return nil
 }
 
@@ -544,6 +558,10 @@ func (sc *ServiceCanal) runCanal(pos mysql.Position) {
 	logger.Infof(sc.context.GetRuntimeContext(), "start canal from %v with binlog-file mode", pos)
 	sc.canal.SetEventHandler(sc)
 	sc.lastBinLogMetric.Set(pos.String())
+	sc.checkpoint.FileName = pos.Name
+	sc.checkpoint.Offset = pos.Pos
+	sc.checkpoint.GTID = ""
+	sc.saveCheckPoint()
 	sc.lastErrorChan <- sc.canal.RunFrom(pos)
 }
 
@@ -551,7 +569,11 @@ func (sc *ServiceCanal) runCanalByGTID(gtid mysql.GTIDSet) {
 	logger.Infof(sc.context.GetRuntimeContext(), "start canal from %v with GTID mode", gtid)
 	sc.canal.SetEventHandler(sc)
 	sc.lastGTIDMetric.Set(gtid.String())
+	var pos mysql.Position
+	sc.checkpoint.FileName = pos.Name
+	sc.checkpoint.Offset = pos.Pos
 	sc.checkpoint.GTID = gtid.String()
+	sc.saveCheckPoint()
 	sc.lastErrorChan <- sc.canal.StartFromGTID(gtid)
 }
 
@@ -569,9 +591,9 @@ func (sc *ServiceCanal) GetBinlogLatestPos() mysql.Position {
 				} else {
 					logger.Error(sc.context.GetRuntimeContext(), "CANAL_INVALID_ALARM", "show binary logs error")
 				}
-				offset, conErr := strconv.Atoi(fmt.Sprint(value[1]))
+				offset, conErr := strconv.ParseUint(fmt.Sprint(value[1]), 10, 64)
 				if conErr == nil {
-					latestPos.Pos = (uint32)(offset)
+					latestPos.Pos = uint32(offset)
 				}
 			}
 		}
@@ -587,7 +609,7 @@ func (sc *ServiceCanal) GetBinlogLatestPos() mysql.Position {
 // used to indicate if the error is caused by network, so that caller can know
 // when to retry (for temporary network problem).
 func (sc *ServiceCanal) getGTIDMode() (bool, bool, error) {
-	statement := "show global variables like 'gtid_mode'"
+	statement := "select @@global.gtid_mode"
 	result, err := sc.canal.Execute(statement)
 	if err != nil {
 		return false, true, fmt.Errorf(
@@ -598,13 +620,13 @@ func (sc *ServiceCanal) getGTIDMode() (bool, bool, error) {
 		return false, false, nil
 	}
 	value := result.Values[len(result.Values)-1]
-	if len(value) != 2 {
-		return false, false, fmt.Errorf("The number of columns (%v) is not 2 for %v",
+	if len(value) != 1 {
+		return false, false, fmt.Errorf("The number of columns (%v) is not 1 for %v",
 			len(value), statement)
 	}
-	gtidModeVal, err := mysqlValueToString(value[1])
+	gtidModeVal, err := mysqlValueToString(value[0])
 	if err != nil {
-		return false, false, fmt.Errorf("Invaild GTID mode value，error: %v", err)
+		return false, false, fmt.Errorf("Invaild GTID mode value, error: %v", err)
 	}
 	if "on" == strings.ToLower(gtidModeVal) {
 		return true, false, nil
@@ -614,7 +636,8 @@ func (sc *ServiceCanal) getGTIDMode() (bool, bool, error) {
 
 // getLatestGTID gets the latest GTID from server.
 func (sc *ServiceCanal) getLatestGTID() (mysql.GTIDSet, error) {
-	statement := "show global variables like 'gtid_executed'"
+	// do not use "show global variables like 'gtid_executed'" as it truncates gtid to 1024 bytes
+	statement := "select @@global.gtid_executed"
 	result, err := sc.canal.Execute(statement)
 	if err != nil {
 		return nil, fmt.Errorf("Execute statement %v failed during getLatestGTID, error: %v",
@@ -624,11 +647,11 @@ func (sc *ServiceCanal) getLatestGTID() (mysql.GTIDSet, error) {
 		return nil, fmt.Errorf("Empty result: statement (%v)", statement)
 	}
 	value := result.Values[len(result.Values)-1]
-	if len(value) != 2 {
-		return nil, fmt.Errorf("The number of columns (%v) is not 2 for %v", len(value), statement)
+	if len(value) != 1 {
+		return nil, fmt.Errorf("The number of columns (%v) is not 1 for %v", len(value), statement)
 	}
 
-	gtidVal, err := mysqlValueToString(value[1])
+	gtidVal, err := mysqlValueToString(value[0])
 	if err != nil {
 		return nil, fmt.Errorf("Invaild GTID value, error: %v", err)
 	}
@@ -641,7 +664,7 @@ func (sc *ServiceCanal) getLatestGTID() (mysql.GTIDSet, error) {
 
 // newCanal is a wrapper of canal.NewCanal with retry logic (every 5 seconds).
 // @return bool to indicate if the shutdown has signaled. non-nil error if
-//   NewCanal failed because of non-ROW mode.
+// NewCanal failed because of non-ROW mode.
 func (sc *ServiceCanal) newCanal() (bool, error) {
 	var err error
 	for {
@@ -664,7 +687,7 @@ func (sc *ServiceCanal) newCanal() (bool, error) {
 }
 
 // Start starts the ServiceInput's service, whatever that may be
-func (sc *ServiceCanal) Start(c ilogtail.Collector) error {
+func (sc *ServiceCanal) Start(c pipeline.Collector) error {
 	sc.lastErrorCount = 0
 	sc.shutdown = make(chan struct{}, 1)
 	sc.waitGroup.Add(1)
@@ -713,7 +736,6 @@ func (sc *ServiceCanal) Start(c ilogtail.Collector) error {
 	sc.initCheckPoint()
 	if !sc.isGTIDEnabled && sc.checkpoint.GTID != "" {
 		sc.checkpoint.GTID = ""
-		sc.saveCheckPoint()
 	}
 	logger.Infof(sc.context.GetRuntimeContext(), "Checkpoint initialized: %v", sc.checkpoint)
 
@@ -730,20 +752,23 @@ func (sc *ServiceCanal) Start(c ilogtail.Collector) error {
 				sc.checkpoint.GTID, err)
 			gtid = nil
 			sc.checkpoint.GTID = ""
-			sc.saveCheckPoint()
 		}
 	}
 	if nil == gtid && sc.checkpoint.FileName != "" {
 		startPos.Name = sc.checkpoint.FileName
-		startPos.Pos = uint32(sc.checkpoint.Offset)
+		startPos.Pos = sc.checkpoint.Offset
 	}
 	if nil == gtid && 0 == len(startPos.Name) && !sc.StartFromBegining {
-		gtid, err = sc.getLatestGTID()
-		if err != nil {
-			logger.Warning(sc.context.GetRuntimeContext(), "CANAL_START_ALARM", "Call getLatestGTID failed, error", err)
+		if sc.isGTIDEnabled {
+			gtid, err = sc.getLatestGTID()
+			if err != nil {
+				logger.Warning(sc.context.GetRuntimeContext(), "CANAL_START_ALARM", "Call getLatestGTID failed, error", err)
+			}
+		}
+		if gtid == nil {
 			startPos = sc.GetBinlogLatestPos()
 		}
-		logger.Infof(sc.context.GetRuntimeContext(), "Get latest checkpoint", gtid, startPos)
+		logger.Infof(sc.context.GetRuntimeContext(), "Get latest checkpoint GTID: %v Position: %v", gtid, startPos)
 	}
 
 	if gtid != nil {
@@ -756,15 +781,13 @@ ForBlock:
 	for {
 		select {
 		case <-sc.shutdown:
+			sc.canal.Close() // will trigger OnPosSynced with force=true
 			logger.Info(sc.context.GetRuntimeContext(), "service_canal quit because of shutting down, checkpoint",
 				sc.checkpoint)
-			sc.canal.Close()
 			<-sc.lastErrorChan
-			sc.saveCheckPoint()
 			return nil
 		case err = <-sc.lastErrorChan:
-			sc.canal.Close()
-			sc.saveCheckPoint()
+			sc.canal.Close() // will trigger OnPosSynced with force=true
 
 			if nil == err {
 				logger.Info(sc.context.GetRuntimeContext(), "Canal returns normally, break loop")
@@ -859,7 +882,7 @@ func NewServiceCanal() *ServiceCanal {
 }
 
 func init() {
-	ilogtail.ServiceInputs["service_canal"] = func() ilogtail.ServiceInput {
+	pipeline.ServiceInputs["service_canal"] = func() pipeline.ServiceInput {
 		return NewServiceCanal()
 	}
 

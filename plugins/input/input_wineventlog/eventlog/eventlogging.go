@@ -12,16 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build windows
 // +build windows
 
 package eventlog
 
 import (
 	"fmt"
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/pkg/logger"
 	"syscall"
 	"time"
+
+	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 
 	"github.com/elastic/beats/v7/winlogbeat/sys"
 	win "github.com/elastic/beats/v7/winlogbeat/sys/eventlogging"
@@ -33,7 +35,7 @@ const (
 )
 
 type eventLogging struct {
-	context     ilogtail.Context
+	context     pipeline.Context
 	name        string // Name of the log that is opened.
 	ignoreOlder time.Duration
 	handle      win.Handle         // Handle to the event log.

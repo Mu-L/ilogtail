@@ -15,14 +15,12 @@
 package pickkey
 
 import (
-	"fmt"
-
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 )
 
-const pluginName = "processor_pick_key"
+const pluginType = "processor_pick_key"
 
 // ProcessorPickKey is picker to select or drop specific keys in LogContents
 type ProcessorPickKey struct {
@@ -34,19 +32,15 @@ type ProcessorPickKey struct {
 	includeLen int
 	excludeLen int
 
-	filterMetric    ilogtail.CounterMetric
-	processedMetric ilogtail.CounterMetric
-	context         ilogtail.Context
+	filterMetric pipeline.CounterMetric
+	context      pipeline.Context
 }
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorPickKey) Init(context ilogtail.Context) error {
+func (p *ProcessorPickKey) Init(context pipeline.Context) error {
 	p.context = context
-
-	p.filterMetric = helper.NewCounterMetric("pick_key_lost")
-	p.context.RegisterCounterMetric(p.filterMetric)
-	p.processedMetric = helper.NewCounterMetric(fmt.Sprintf("%v_processed", pluginName))
-	p.context.RegisterCounterMetric(p.processedMetric)
+	metricsRecord := p.context.GetMetricRecord()
+	p.filterMetric = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginDiscardedEventsTotal)
 
 	if len(p.Include) > 0 {
 		p.includeMap = make(map[string]struct{})
@@ -111,14 +105,13 @@ func (p *ProcessorPickKey) ProcessLogs(logArray []*protocol.Log) []*protocol.Log
 			}
 			nextIdx++
 		}
-		p.processedMetric.Add(1)
 	}
 	logArray = logArray[:nextIdx]
 	return logArray
 }
 
 func init() {
-	ilogtail.Processors[pluginName] = func() ilogtail.Processor {
+	pipeline.Processors[pluginType] = func() pipeline.Processor {
 		return &ProcessorPickKey{}
 	}
 }

@@ -20,8 +20,8 @@ import (
 	"reflect"
 	"sync"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	v3 "github.com/alibaba/ilogtail/plugins/input/skywalkingv3/skywalking/network/common/v3"
 	management "github.com/alibaba/ilogtail/plugins/input/skywalkingv3/skywalking/network/management/v3"
 )
@@ -63,22 +63,26 @@ func (r *ResourcePropertiesCache) filterProperties(properties map[string]string)
 	delete(properties, "Start Time")
 	delete(properties, "JVM Arguments")
 	delete(properties, "Jar Dependencies")
+
+	if properties["namespace"] != "" {
+		properties[AttributeServiceNamespace] = properties["namespace"]
+		delete(properties, "namespace")
+	}
+
 	return properties
 }
 
-func (r *ResourcePropertiesCache) save(ctx ilogtail.Context) {
+func (r *ResourcePropertiesCache) save(ctx pipeline.Context) {
 	r.lock.Lock()
 	jsonBytes, _ := json.Marshal(r.cache)
 	r.lock.Unlock()
 	err := ctx.SaveCheckPoint(r.cacheKey, jsonBytes)
 	if err != nil {
 		logger.Error(ctx.GetRuntimeContext(), "SKYWALKING_SAVE_CHECKPOINT_FAIL", "err", err.Error())
-	} else {
-		logger.Info(ctx.GetRuntimeContext(), "msg", "skywalking save checkpoint done")
 	}
 }
 
-func (r *ResourcePropertiesCache) load(ctx ilogtail.Context) bool {
+func (r *ResourcePropertiesCache) load(ctx pipeline.Context) bool {
 	bytes, ok := ctx.GetCheckPoint(r.cacheKey)
 	if ok {
 		err := json.Unmarshal(bytes, &r.cache)
@@ -86,18 +90,38 @@ func (r *ResourcePropertiesCache) load(ctx ilogtail.Context) bool {
 			logger.Error(ctx.GetRuntimeContext(), "SKYWALKING_LOAD_CHECKPOINT_FAIL", "err", err.Error())
 			return false
 		}
-		logger.Info(ctx.GetRuntimeContext(), "msg", "skywalking load checkpoint done", "count", len(r.cache))
 	}
 	return true
 }
 
 type ManagementHandler struct {
-	context   ilogtail.Context
-	collector ilogtail.Collector
+	context   pipeline.Context
+	collector pipeline.Collector
 	cache     *ResourcePropertiesCache
 }
 
-func NewManagementHandler(context ilogtail.Context, collector ilogtail.Collector, cache *ResourcePropertiesCache) *ManagementHandler {
+func (m *ManagementHandler) keepAliveHandler(req *management.InstancePingPkg) (*v3.Commands, error) {
+	return &v3.Commands{}, nil
+}
+
+func (m *ManagementHandler) reportInstanceProperties(instanceProperties *management.InstanceProperties) (result *v3.Commands, e error) {
+	defer panicRecover()
+	propertyMap := ConvertResourceOt(instanceProperties)
+	if m.cache.put(instanceProperties.Service, instanceProperties.ServiceInstance, propertyMap) {
+		m.cache.save(m.context)
+	}
+	return &v3.Commands{}, nil
+}
+
+type keepAliveHandler interface {
+	keepAliveHandler(req *management.InstancePingPkg) (*v3.Commands, error)
+}
+
+type reportInstancePropertiesHandler interface {
+	reportInstanceProperties(instanceProperties *management.InstanceProperties) (result *v3.Commands, e error)
+}
+
+func NewManagementHandler(context pipeline.Context, collector pipeline.Collector, cache *ResourcePropertiesCache) *ManagementHandler {
 	return &ManagementHandler{
 		context:   context,
 		collector: collector,
@@ -106,12 +130,7 @@ func NewManagementHandler(context ilogtail.Context, collector ilogtail.Collector
 }
 
 func (m *ManagementHandler) ReportInstanceProperties(ctx context.Context, req *management.InstanceProperties) (*v3.Commands, error) {
-	defer panicRecover()
-	propertyMap := ConvertResourceOt(req)
-	if m.cache.put(req.Service, req.ServiceInstance, propertyMap) {
-		m.cache.save(m.context)
-	}
-	return &v3.Commands{}, nil
+	return m.reportInstanceProperties(req)
 }
 func (*ManagementHandler) KeepAlive(ctx context.Context, req *management.InstancePingPkg) (*v3.Commands, error) {
 	return &v3.Commands{}, nil

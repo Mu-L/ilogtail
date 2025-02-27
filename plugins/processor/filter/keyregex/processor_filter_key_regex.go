@@ -15,30 +15,28 @@
 package keyregex
 
 import (
-	"fmt"
 	"regexp"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 )
 
-const pluginName = "processor_filter_key_regex"
+const pluginType = "processor_filter_key_regex"
 
 type ProcessorKeyFilter struct {
 	Include []string
 	Exclude []string
 
-	includeRegex    []*regexp.Regexp
-	excludeRegex    []*regexp.Regexp
-	filterMetric    ilogtail.CounterMetric
-	processedMetric ilogtail.CounterMetric
-	context         ilogtail.Context
+	includeRegex []*regexp.Regexp
+	excludeRegex []*regexp.Regexp
+	filterMetric pipeline.CounterMetric
+	context      pipeline.Context
 }
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorKeyFilter) Init(context ilogtail.Context) error {
+func (p *ProcessorKeyFilter) Init(context pipeline.Context) error {
 	p.context = context
 	if len(p.Include) > 0 {
 		p.includeRegex = make([]*regexp.Regexp, len(p.Include))
@@ -62,10 +60,9 @@ func (p *ProcessorKeyFilter) Init(context ilogtail.Context) error {
 			p.excludeRegex[key] = reg
 		}
 	}
-	p.filterMetric = helper.NewCounterMetric(fmt.Sprintf("%v_filtered", pluginName))
-	p.context.RegisterCounterMetric(p.filterMetric)
-	p.processedMetric = helper.NewCounterMetric(fmt.Sprintf("%v_processed", pluginName))
-	p.context.RegisterCounterMetric(p.processedMetric)
+
+	metricsRecord := p.context.GetMetricRecord()
+	p.filterMetric = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginDiscardedEventsTotal)
 	return nil
 }
 
@@ -76,8 +73,8 @@ func (*ProcessorKeyFilter) Description() string {
 func (p *ProcessorKeyFilter) IsLogMatch(log *protocol.Log) bool {
 	if p.includeRegex != nil {
 	ForBlock:
-		for _, cont := range log.Contents {
-			for _, reg := range p.includeRegex {
+		for _, reg := range p.includeRegex {
+			for _, cont := range log.Contents {
 				if reg.MatchString(cont.Key) {
 					continue ForBlock
 				}
@@ -111,14 +108,13 @@ func (p *ProcessorKeyFilter) ProcessLogs(logArray []*protocol.Log) []*protocol.L
 		} else {
 			p.filterMetric.Add(1)
 		}
-		p.processedMetric.Add(1)
 	}
 	logArray = logArray[:nextIdx]
 	return logArray
 }
 
 func init() {
-	ilogtail.Processors[pluginName] = func() ilogtail.Processor {
+	pipeline.Processors[pluginType] = func() pipeline.Processor {
 		return &ProcessorKeyFilter{}
 	}
 }

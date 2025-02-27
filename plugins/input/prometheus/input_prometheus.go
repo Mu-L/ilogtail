@@ -18,39 +18,66 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/auth"
 	liblogger "github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/prompbmarshal"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/promscrape"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/protoparser/common"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/pkg/util"
+	"github.com/alibaba/ilogtail/pkg/config"
+	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 )
 
 var libLoggerOnce sync.Once
 
 type ServiceStaticPrometheus struct {
-	Yaml              string `comment:"the prometheus configuration content, more details please see [here](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)"`
-	ConfigFilePath    string `comment:"the prometheus configuration path, and the param would be ignored when Yaml param is configured."`
-	AuthorizationPath string `comment:"the prometheus authorization path, only using in authorization files. When Yaml param is configured, the default value is the current binary path. However, the default value is the ConfigFilePath directory when ConfigFilePath is working."`
+	Yaml              string            `comment:"the prometheus configuration content, more details please see [here](https://prometheus.io/docs/prometheus/latest/configuration/configuration/)"`
+	ConfigFilePath    string            `comment:"the prometheus configuration path, and the param would be ignored when Yaml param is configured."`
+	AuthorizationPath string            `comment:"the prometheus authorization path, only using in authorization files. When Yaml param is configured, the default value is the current binary path. However, the default value is the ConfigFilePath directory when ConfigFilePath is working."`
+	ExtraFlags        map[string]string `comment:"the prometheus extra configuration flags, like promscrape.maxScrapeSize, for more flags please see [here](https://docs.victoriametrics.com/vmagent.html#advanced-usage)"`
+	NoStaleMarkers    bool              `comment:"Whether to disable sending Prometheus stale markers for metrics when scrape target disappears. This option may reduce memory usage if stale markers aren't needed for your setup. This option also disables populating the scrape_series_added metric. See https://prometheus.io/docs/concepts/jobs_instances/#automatically-generated-labels-and-time-series"`
 
-	scraper       *promscrape.Scraper //nolint:typecheck
-	shutdown      chan struct{}
-	waitGroup     sync.WaitGroup
-	context       ilogtail.Context
+	scraper   *promscrape.Scraper //nolint:typecheck
+	shutdown  chan struct{}
+	waitGroup sync.WaitGroup
+	context   pipeline.Context
+	lock      sync.Mutex
+	running   bool
+	collector pipeline.Collector
+	kubeMeta  *KubernetesMeta
 }
 
-func (p *ServiceStaticPrometheus) Init(context ilogtail.Context) (int, error) {
+func (p *ServiceStaticPrometheus) Init(context pipeline.Context) (int, error) {
+	p.kubeMeta = NewKubernetesMeta(context)
+	if p.kubeMeta.readKubernetesWorkloadMeta() {
+		promscrape.ConfigMemberInfo(int(p.kubeMeta.replicas), strconv.Itoa(p.kubeMeta.currentNum))
+	}
 	libLoggerOnce.Do(func() {
 		if f := flag.Lookup("loggerOutput"); f != nil {
 			_ = f.Value.Set("stdout")
 		}
+		// set max scrape size to 256MB
+		err := flag.Set("promscrape.maxScrapeSize", "268435456")
+		logger.Info(context.GetRuntimeContext(), "set config maxScrapeSize to 256MB, error", err)
 		liblogger.Init()
+		common.StartUnmarshalWorkers()
+		if p.NoStaleMarkers {
+			err := flag.Set("promscrape.noStaleMarkers", "true")
+			logger.Info(context.GetRuntimeContext(), "set config", "promscrape.noStaleMarkers", "value", "true", "error", err)
+		}
+		for k, v := range p.ExtraFlags {
+			err := flag.Set(k, v)
+			logger.Info(context.GetRuntimeContext(), "set config", k, "value", v, "error", err)
+		}
 	})
 	p.context = context
 	var detail []byte
@@ -58,7 +85,7 @@ func (p *ServiceStaticPrometheus) Init(context ilogtail.Context) (int, error) {
 	case p.Yaml != "":
 		detail = []byte(p.Yaml)
 		if p.AuthorizationPath == "" {
-			p.AuthorizationPath = util.GetCurrentBinaryPath()
+			p.AuthorizationPath = config.LoongcollectorGlobalConfig.LoongCollectorPrometheusAuthorizationPath
 		}
 	case p.ConfigFilePath != "":
 		f, err := os.Open(p.ConfigFilePath)
@@ -68,7 +95,7 @@ func (p *ServiceStaticPrometheus) Init(context ilogtail.Context) (int, error) {
 		defer func(f *os.File) {
 			_ = f.Close()
 		}(f)
-		bytes, err := ioutil.ReadAll(f)
+		bytes, err := io.ReadAll(f)
 		if err != nil {
 			return 0, fmt.Errorf("cannot read prometheus configuration file")
 		}
@@ -96,13 +123,16 @@ func (p *ServiceStaticPrometheus) Description() string {
 }
 
 // Start starts the ServiceInput's service, whatever that may be
-func (p *ServiceStaticPrometheus) Start(c ilogtail.Collector) error {
+func (p *ServiceStaticPrometheus) Start(c pipeline.Collector) error {
+	p.collector = c
 	p.shutdown = make(chan struct{})
 	p.waitGroup.Add(1)
 	defer p.waitGroup.Done()
-	p.scraper.Init(func(wr *prompbmarshal.WriteRequest) {
-		appendTSDataToSlsLog(c, wr)
-	})
+	p.scraper.Init(p.slsPushData)
+	p.running = true
+	if p.kubeMeta.isWorkingOnClusterMode() {
+		p.StartKubeReloadScraper()
+	}
 	<-p.shutdown
 	p.scraper.Stop()
 	return nil
@@ -110,13 +140,51 @@ func (p *ServiceStaticPrometheus) Start(c ilogtail.Collector) error {
 
 // Stop stops the services and closes any necessary channels and connections
 func (p *ServiceStaticPrometheus) Stop() error {
+	p.lock.Lock()
+	defer p.lock.Unlock()
+	p.running = false
 	close(p.shutdown)
 	p.waitGroup.Wait()
 	return nil
 }
 
+func (p *ServiceStaticPrometheus) StartKubeReloadScraper() {
+	go func() {
+		ticker := time.NewTicker(time.Second * 10)
+		for {
+			select {
+			case <-p.shutdown:
+				return
+			case <-ticker.C:
+				change, err := p.kubeMeta.getPrometheusReplicas()
+				if !change || err != nil {
+					continue
+				}
+				logger.Info(p.context.GetRuntimeContext(), "found change replicas, would start reload prometheus scraper", p.kubeMeta.replicas)
+				p.lock.Lock()
+				if !p.running {
+					return
+				}
+				promscrape.ConfigMemberInfo(int(p.kubeMeta.replicas), strconv.Itoa(p.kubeMeta.currentNum))
+				p.scraper.Stop()
+				p.scraper.Init(p.slsPushData)
+				p.lock.Unlock()
+				logger.Info(p.context.GetRuntimeContext(), "reload prometheus scraper done")
+			}
+		}
+	}()
+}
+
 func init() {
-	ilogtail.ServiceInputs["service_prometheus"] = func() ilogtail.ServiceInput {
-		return &ServiceStaticPrometheus{}
+	pipeline.ServiceInputs["service_prometheus"] = func() pipeline.ServiceInput {
+		return &ServiceStaticPrometheus{
+			NoStaleMarkers: true,
+		}
 	}
+}
+
+func (p *ServiceStaticPrometheus) slsPushData(_ *auth.Token, wr *prompbmarshal.WriteRequest) {
+	logger.Debug(p.context.GetRuntimeContext(), "append new metrics", wr.Size())
+	appendTSDataToSlsLog(p.collector, wr)
+	logger.Debug(p.context.GetRuntimeContext(), "append done", wr.Size())
 }

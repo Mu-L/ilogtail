@@ -22,8 +22,8 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 
-	"github.com/alibaba/ilogtail"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/plugins/input/skywalkingv2/skywalking/apm/network/language/agent"
 	"github.com/alibaba/ilogtail/plugins/input/skywalkingv3"
 )
@@ -36,8 +36,8 @@ const (
 type TraceSegmentHandle struct {
 	RegistryInformationCache
 
-	context   ilogtail.Context
-	collector ilogtail.Collector
+	context   pipeline.Context
+	collector pipeline.Collector
 
 	compIDMessagingSystemMapping map[int32]string
 }
@@ -118,6 +118,7 @@ func (t *TraceSegmentHandle) parseSpan(span *agent.SpanObject, applicationInstan
 		otSpan.Kind = skywalkingv3.OpenTracingSpanKindServer
 	case span.SpanType == agent.SpanType_Exit:
 		otSpan.Kind = skywalkingv3.OpenTracingSpanKindClient
+		mappingDatabaseTag(span, otSpan)
 	case span.SpanType == agent.SpanType_Local:
 		otSpan.Kind = skywalkingv3.OpenTracingSpanKindInternal
 	default:
@@ -192,7 +193,39 @@ func (t *TraceSegmentHandle) parseSpan(span *agent.SpanObject, applicationInstan
 	} else {
 		otSpan.StatusCode = skywalkingv3.StatusCodeOk
 	}
+
+	switch {
+	case span.SpanLayer == agent.SpanLayer_MQ:
+		t.mappingMessageSystemTag(span, otSpan)
+	case span.SpanType == agent.SpanType_Exit:
+		mappingDatabaseTag(span, otSpan)
+	}
+
 	return otSpan
+}
+
+func mappingDatabaseTag(span *agent.SpanObject, otSpan *skywalkingv3.OtSpan) {
+	if span.GetPeer() == "" {
+		return
+	}
+
+	if span.SpanLayer != agent.SpanLayer_Database {
+		return
+	}
+
+	var dbType string
+	for _, tag := range span.GetTags() {
+		if tag.Key == "db.type" {
+			dbType = tag.Value
+			break
+		}
+	}
+
+	if dbType == "" {
+		return
+	}
+
+	otSpan.Attribute[skywalkingv3.AttributeDBConnectionString] = strings.ToLower(dbType) + "://" + span.GetPeer()
 }
 
 func convertUniIDToString(u *agent.UniqueId) string {

@@ -15,16 +15,15 @@
 package regex
 
 import (
-	"fmt"
 	"regexp"
 
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/protocol"
 )
 
-const pluginName = "processor_filter_regex"
+const pluginType = "processor_filter_regex"
 
 // ProcessorRegexFilter is a processor plugin to filter log according to the value of field.
 // Include/Exclude are maps from string to string, key is used to search field in log, value
@@ -35,15 +34,14 @@ type ProcessorRegexFilter struct {
 	Include map[string]string
 	Exclude map[string]string
 
-	includeRegex    map[string]*regexp.Regexp
-	excludeRegex    map[string]*regexp.Regexp
-	filterMetric    ilogtail.CounterMetric
-	processedMetric ilogtail.CounterMetric
-	context         ilogtail.Context
+	includeRegex map[string]*regexp.Regexp
+	excludeRegex map[string]*regexp.Regexp
+	filterMetric pipeline.CounterMetric
+	context      pipeline.Context
 }
 
 // Init called for init some system resources, like socket, mutex...
-func (p *ProcessorRegexFilter) Init(context ilogtail.Context) error {
+func (p *ProcessorRegexFilter) Init(context pipeline.Context) error {
 	p.context = context
 	if p.Include != nil {
 		p.includeRegex = make(map[string]*regexp.Regexp)
@@ -67,10 +65,8 @@ func (p *ProcessorRegexFilter) Init(context ilogtail.Context) error {
 			p.excludeRegex[key] = reg
 		}
 	}
-	p.filterMetric = helper.NewCounterMetric(fmt.Sprintf("%v_filtered", pluginName))
-	p.context.RegisterCounterMetric(p.filterMetric)
-	p.processedMetric = helper.NewCounterMetric(fmt.Sprintf("%v_processed", pluginName))
-	p.context.RegisterCounterMetric(p.processedMetric)
+	metricsRecord := p.context.GetMetricRecord()
+	p.filterMetric = helper.NewCounterMetricAndRegister(metricsRecord, helper.MetricPluginDiscardedEventsTotal)
 	return nil
 }
 
@@ -126,14 +122,13 @@ func (p *ProcessorRegexFilter) ProcessLogs(logArray []*protocol.Log) []*protocol
 		} else {
 			p.filterMetric.Add(1)
 		}
-		p.processedMetric.Add(1)
 	}
 	logArray = logArray[:nextIdx]
 	return logArray
 }
 
 func init() {
-	ilogtail.Processors[pluginName] = func() ilogtail.Processor {
+	pipeline.Processors[pluginType] = func() pipeline.Processor {
 		return &ProcessorRegexFilter{}
 	}
 }

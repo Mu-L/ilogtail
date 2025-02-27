@@ -15,9 +15,9 @@
 package systemv2
 
 import (
-	"github.com/alibaba/ilogtail"
-	"github.com/alibaba/ilogtail/helper"
+	"github.com/alibaba/ilogtail/pkg/helper"
 	"github.com/alibaba/ilogtail/pkg/logger"
+	"github.com/alibaba/ilogtail/pkg/pipeline"
 	"github.com/alibaba/ilogtail/pkg/util"
 
 	"math"
@@ -67,21 +67,19 @@ type InputSystem struct {
 	lastDiskStat           disk.IOCountersStat
 	lastDiskStatAll        map[string]disk.IOCountersStat
 	lastDiskTime           time.Time
-	commonLabels           helper.KeyValues
-	commonLabelsStr        string
+	commonLabels           helper.MetricLabels
 	collectTime            time.Time
-	context                ilogtail.Context
+	context                pipeline.Context
 	excludeDiskFsTypeRegex *regexp.Regexp
 	excludeDiskPathRegex   *regexp.Regexp
-	//nolint: structcheck,unused
-	fs *procfs.FS
+	fs                     *procfs.FS //nolint:unused
 }
 
 func (r *InputSystem) Description() string {
 	return "Support collect system metrics on the host machine or Linux virtual environments."
 }
 
-func (r *InputSystem) CommonInit(context ilogtail.Context) (int, error) {
+func (r *InputSystem) CommonInit(context pipeline.Context) (int, error) {
 	if r.ExcludeDiskFsType != "" {
 		reg, err := regexp.Compile(r.ExcludeDiskFsType)
 		if err != nil {
@@ -98,26 +96,19 @@ func (r *InputSystem) CommonInit(context ilogtail.Context) (int, error) {
 		}
 		r.excludeDiskPathRegex = reg
 	}
-	r.context = context
 	r.commonLabels.Append("hostname", util.GetHostName())
 	r.commonLabels.Append("ip", util.GetIPAddress())
 	for key, val := range r.Labels {
 		r.commonLabels.Append(key, val)
 	}
-	r.commonLabels.Sort()
-	r.commonLabelsStr = r.commonLabels.String()
 	return 0, nil
 }
 
-func (r *InputSystem) addMetric(collector ilogtail.Collector,
-	name string,
-	labels string,
-	value float64) {
-	keys, vals := helper.MakeMetric(name, labels, r.collectTime.UnixNano(), value)
-	collector.AddDataArray(nil, keys, vals, r.collectTime)
+func (r *InputSystem) addMetric(collector pipeline.Collector, name string, labels *helper.MetricLabels, value float64) {
+	collector.AddRawLog(helper.NewMetricLog(name, r.collectTime.UnixNano(), value, labels))
 }
 
-func (r *InputSystem) CollectCore(collector ilogtail.Collector) {
+func (r *InputSystem) CollectCore(collector pipeline.Collector) {
 
 	// host info
 	if r.lastInfo == nil {
@@ -127,14 +118,14 @@ func (r *InputSystem) CollectCore(collector ilogtail.Collector) {
 	// load stat
 	loadStat, err := load.Avg()
 	if err == nil {
-		r.addMetric(collector, "system_load1", r.commonLabelsStr, loadStat.Load1)
-		r.addMetric(collector, "system_load5", r.commonLabelsStr, loadStat.Load5)
-		r.addMetric(collector, "system_load15", r.commonLabelsStr, loadStat.Load15)
+		r.addMetric(collector, "system_load1", &r.commonLabels, loadStat.Load1)
+		r.addMetric(collector, "system_load5", &r.commonLabels, loadStat.Load5)
+		r.addMetric(collector, "system_load15", &r.commonLabels, loadStat.Load15)
 	}
-	r.addMetric(collector, "system_boot_time", r.commonLabelsStr, float64(r.lastInfo.BootTime))
+	r.addMetric(collector, "system_boot_time", &r.commonLabels, float64(r.lastInfo.BootTime))
 }
 
-func (r *InputSystem) CollectCPU(collector ilogtail.Collector) {
+func (r *InputSystem) CollectCPU(collector pipeline.Collector) {
 	// cpu stat
 	cpuStat, err := cpu.Times(false)
 	cpuInfo, _ := cpu.Info()
@@ -142,7 +133,7 @@ func (r *InputSystem) CollectCPU(collector ilogtail.Collector) {
 	for _, c := range cpuInfo {
 		ncpus += c.Cores
 	}
-	r.addMetric(collector, "cpu_count", r.commonLabelsStr, float64(ncpus))
+	r.addMetric(collector, "cpu_count", &r.commonLabels, float64(ncpus))
 	if err == nil && len(cpuStat) > 0 {
 		cpuBusy := cpuStat[0].GuestNice + cpuStat[0].Guest + cpuStat[0].Nice +
 			cpuStat[0].Softirq + cpuStat[0].Irq + cpuStat[0].User + cpuStat[0].System
@@ -165,16 +156,16 @@ func (r *InputSystem) CollectCPU(collector ilogtail.Collector) {
 
 		deltaTotal := cpuTotal - r.lastCPUTotal
 		if r.CPUPercent && !r.lastCPUTime.IsZero() && deltaTotal > 0 {
-			r.addMetric(collector, "cpu_util", r.commonLabelsStr, 100*(cpuBusy-r.lastCPUBusy)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_wait_util", r.commonLabelsStr, 100*(cpuStat[0].Iowait-r.lastCPUStat.Iowait)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_sys_util", r.commonLabelsStr, 100*(cpuStat[0].System-r.lastCPUStat.System)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_user_util", r.commonLabelsStr, 100*(cpuStat[0].User-r.lastCPUStat.User)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_irq_util", r.commonLabelsStr, 100*(cpuStat[0].Irq-r.lastCPUStat.Irq)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_softirq_util", r.commonLabelsStr, 100*(cpuStat[0].Softirq-r.lastCPUStat.Softirq)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_nice_util", r.commonLabelsStr, 100*(cpuStat[0].Nice-r.lastCPUStat.Nice)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_steal_util", r.commonLabelsStr, 100*(cpuStat[0].Steal-r.lastCPUStat.Steal)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_guest_util", r.commonLabelsStr, 100*(cpuStat[0].Guest-r.lastCPUStat.Guest)/deltaTotal*cpuShareFactor)
-			r.addMetric(collector, "cpu_guestnice_util", r.commonLabelsStr, 100*(cpuStat[0].GuestNice-r.lastCPUStat.GuestNice)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_util", &r.commonLabels, 100*(cpuBusy-r.lastCPUBusy)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_wait_util", &r.commonLabels, 100*(cpuStat[0].Iowait-r.lastCPUStat.Iowait)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_sys_util", &r.commonLabels, 100*(cpuStat[0].System-r.lastCPUStat.System)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_user_util", &r.commonLabels, 100*(cpuStat[0].User-r.lastCPUStat.User)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_irq_util", &r.commonLabels, 100*(cpuStat[0].Irq-r.lastCPUStat.Irq)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_softirq_util", &r.commonLabels, 100*(cpuStat[0].Softirq-r.lastCPUStat.Softirq)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_nice_util", &r.commonLabels, 100*(cpuStat[0].Nice-r.lastCPUStat.Nice)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_steal_util", &r.commonLabels, 100*(cpuStat[0].Steal-r.lastCPUStat.Steal)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_guest_util", &r.commonLabels, 100*(cpuStat[0].Guest-r.lastCPUStat.Guest)/deltaTotal*cpuShareFactor)
+			r.addMetric(collector, "cpu_guestnice_util", &r.commonLabels, 100*(cpuStat[0].GuestNice-r.lastCPUStat.GuestNice)/deltaTotal*cpuShareFactor)
 		}
 
 		r.lastCPUTime = time.Now()
@@ -184,29 +175,27 @@ func (r *InputSystem) CollectCPU(collector ilogtail.Collector) {
 	}
 }
 
-func (r *InputSystem) CollectMem(collector ilogtail.Collector) {
+func (r *InputSystem) CollectMem(collector pipeline.Collector) {
 	// mem stat
 	memStat, err := mem.VirtualMemory()
 	if err == nil {
-		r.addMetric(collector, "mem_util", r.commonLabelsStr, memStat.UsedPercent)
-		r.addMetric(collector, "mem_cache", r.commonLabelsStr, float64(memStat.Cached))
-		r.addMetric(collector, "mem_free", r.commonLabelsStr, float64(memStat.Free))
-		r.addMetric(collector, "mem_available", r.commonLabelsStr, float64(memStat.Available))
-		r.addMetric(collector, "mem_used", r.commonLabelsStr, float64(memStat.Used))
-		r.addMetric(collector, "mem_total", r.commonLabelsStr, float64(memStat.Total))
+		r.addMetric(collector, "mem_util", &r.commonLabels, memStat.UsedPercent)
+		r.addMetric(collector, "mem_cache", &r.commonLabels, float64(memStat.Cached))
+		r.addMetric(collector, "mem_free", &r.commonLabels, float64(memStat.Free))
+		r.addMetric(collector, "mem_available", &r.commonLabels, float64(memStat.Available))
+		r.addMetric(collector, "mem_used", &r.commonLabels, float64(memStat.Used))
+		r.addMetric(collector, "mem_total", &r.commonLabels, float64(memStat.Total))
 	}
 
 	swapStat, err := mem.SwapMemory()
 	if err == nil {
-		r.addMetric(collector, "mem_swap_util", r.commonLabelsStr, swapStat.UsedPercent)
+		r.addMetric(collector, "mem_swap_util", &r.commonLabels, swapStat.UsedPercent)
 	}
 }
 
-func (r *InputSystem) collectOneDisk(collector ilogtail.Collector, name string, timeDeltaSec float64, last, now *disk.IOCountersStat) {
-	newLabels := r.commonLabels.Clone()
-	newLabels.Append("disk", name)
-	newLabels.Sort()
-	labels := newLabels.String()
+func (r *InputSystem) collectOneDisk(collector pipeline.Collector, name string, timeDeltaSec float64, last, now *disk.IOCountersStat) {
+	labels := r.commonLabels.Clone()
+	labels.Append("disk", name)
 	r.addMetric(collector, "disk_rbps", labels, float64(now.ReadBytes-last.ReadBytes)/timeDeltaSec)
 	r.addMetric(collector, "disk_wbps", labels, float64(now.WriteBytes-last.WriteBytes)/timeDeltaSec)
 	r.addMetric(collector, "disk_riops", labels, float64(now.ReadCount-last.ReadCount)/timeDeltaSec)
@@ -226,7 +215,7 @@ func (r *InputSystem) collectOneDisk(collector ilogtail.Collector, name string, 
 	}
 }
 
-func (r *InputSystem) CollectDisk(collector ilogtail.Collector) {
+func (r *InputSystem) CollectDisk(collector pipeline.Collector) {
 	r.CollectDiskUsage(collector)
 
 	// disk stat
@@ -234,6 +223,14 @@ func (r *InputSystem) CollectDisk(collector ilogtail.Collector) {
 	if err == nil {
 		totalIoCount := disk.IOCountersStat{}
 		for _, ioCount := range allIoCounters {
+			if ioCount.Name == "" {
+				continue
+			}
+			lastChar := ioCount.Name[len(ioCount.Name)-1]
+			if lastChar >= '0' && lastChar <= '9' {
+				// means disk partition, don't need to record to total metrics
+				continue
+			}
 			totalIoCount.ReadBytes += ioCount.ReadBytes
 			totalIoCount.WriteBytes += ioCount.WriteBytes
 			totalIoCount.ReadCount += ioCount.ReadCount
@@ -264,11 +261,9 @@ func (r *InputSystem) CollectDisk(collector ilogtail.Collector) {
 	}
 }
 
-func (r *InputSystem) collectOneNet(collector ilogtail.Collector, name string, timeDeltaSec float64, last, now *net.IOCountersStat) {
-	newLabels := r.commonLabels.Clone()
-	newLabels.Append("interface", name)
-	newLabels.Sort()
-	labels := newLabels.String()
+func (r *InputSystem) collectOneNet(collector pipeline.Collector, name string, timeDeltaSec float64, last, now *net.IOCountersStat) {
+	labels := r.commonLabels.Clone()
+	labels.Append("interface", name)
 	r.addMetric(collector, "net_in", labels, float64(now.BytesRecv-last.BytesRecv)/timeDeltaSec)
 	r.addMetric(collector, "net_out", labels, float64(now.BytesSent-last.BytesSent)/timeDeltaSec)
 	r.addMetric(collector, "net_in_pkt", labels, float64(now.PacketsRecv-last.PacketsRecv)/timeDeltaSec)
@@ -292,7 +287,7 @@ func (r *InputSystem) collectOneNet(collector ilogtail.Collector, name string, t
 	}
 }
 
-func (r *InputSystem) CollectNet(collector ilogtail.Collector) {
+func (r *InputSystem) CollectNet(collector pipeline.Collector) {
 	netIoStatAll, err := net.IOCounters(true)
 	if err == nil && len(netIoStatAll) > 0 {
 		nowTime := time.Now()
@@ -340,7 +335,7 @@ func (r *InputSystem) CollectNet(collector ilogtail.Collector) {
 	}
 }
 
-func (r *InputSystem) CollectProtocol(collector ilogtail.Collector) {
+func (r *InputSystem) CollectProtocol(collector pipeline.Collector) {
 	protoCounterStats, err := net.ProtoCounters([]string{})
 	if err == nil && len(protoCounterStats) > 0 {
 
@@ -360,13 +355,13 @@ func (r *InputSystem) CollectProtocol(collector ilogtail.Collector) {
 					deltaTotalOutSegs := protoCounterStats[i].Stats[totalOutSegField] - r.lastProtoAll[i].Stats[totalOutSegField]
 					deltaTotalInSegs := protoCounterStats[i].Stats[totalInSegField] - r.lastProtoAll[i].Stats[totalInSegField]
 
-					r.addMetric(collector, "protocol_tcp_outsegs", r.commonLabelsStr, float64(deltaTotalOutSegs))
-					r.addMetric(collector, "protocol_tcp_insegs", r.commonLabelsStr, float64(deltaTotalInSegs))
-					r.addMetric(collector, "protocol_tcp_retran_segs", r.commonLabelsStr, float64(deltaRetransSegs))
+					r.addMetric(collector, "protocol_tcp_outsegs", &r.commonLabels, float64(deltaTotalOutSegs))
+					r.addMetric(collector, "protocol_tcp_insegs", &r.commonLabels, float64(deltaTotalInSegs))
+					r.addMetric(collector, "protocol_tcp_retran_segs", &r.commonLabels, float64(deltaRetransSegs))
 					if deltaTotalOutSegs <= 0 {
-						r.addMetric(collector, "protocol_tcp_retran_util", r.commonLabelsStr, 0.)
+						r.addMetric(collector, "protocol_tcp_retran_util", &r.commonLabels, 0.)
 					} else {
-						r.addMetric(collector, "protocol_tcp_retran_util", r.commonLabelsStr, 100*float64(deltaRetransSegs)/float64(deltaTotalOutSegs))
+						r.addMetric(collector, "protocol_tcp_retran_util", &r.commonLabels, 100*float64(deltaRetransSegs)/float64(deltaTotalOutSegs))
 					}
 
 				}
@@ -377,7 +372,7 @@ func (r *InputSystem) CollectProtocol(collector ilogtail.Collector) {
 	}
 }
 
-func (r *InputSystem) Collect(collector ilogtail.Collector) error {
+func (r *InputSystem) Collect(collector pipeline.Collector) error {
 	r.collectTime = time.Now()
 	r.CollectCore(collector)
 	if r.CPU {
@@ -387,7 +382,14 @@ func (r *InputSystem) Collect(collector ilogtail.Collector) error {
 		r.CollectMem(collector)
 	}
 	if r.Disk {
-		r.CollectDisk(collector)
+		err := util.DoFuncWithTimeout(time.Second*3, func() error {
+			r.CollectDisk(collector)
+			return nil
+		})
+		if err != nil {
+			logger.Error(r.context.GetRuntimeContext(), "READ_DISK_ALARM", "read disk metrics timeout, would skip disk collection", err)
+			r.Disk = false
+		}
 	}
 	if r.Net {
 		r.CollectNet(collector)
@@ -402,7 +404,7 @@ func (r *InputSystem) Collect(collector ilogtail.Collector) error {
 }
 
 func init() {
-	ilogtail.MetricInputs["metric_system_v2"] = func() ilogtail.MetricInput {
+	pipeline.MetricInputs["metric_system_v2"] = func() pipeline.MetricInput {
 		return &InputSystem{
 			CPUPercent:        true,
 			CPU:               true,
